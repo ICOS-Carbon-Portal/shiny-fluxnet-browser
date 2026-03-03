@@ -21,21 +21,7 @@ A **Shiny for Python** web application for interactive time series analysis of [
 
 ## Screenshot
 
-After launching the app, click **Query ICOS files**, select a station file, and click **Download & load**:
-
-```
-┌─────────────────────────────────────────────────────┐
-│  ICOS Ecosystem FLUXNET data browser                │
-│ ┌──────────┐ ┌────────────────────────────────────┐ │
-│ │ Sidebar   │ │  Interactive Plotly chart (50 vh)  │ │
-│ │           │ │                                    │ │
-│ │ ICOS query│ ├──────┬──────┬──────┬──────┬──────┤ │
-│ │ File sel. │ │ S1   │ S2   │ S3   │ S4   │ S5   │ │
-│ │ View mode │ │      │      │      │      │      │ │
-│ │ Filters   │ │ S6   │      │      │      │      │ │
-│ └──────────┘ └──────┴──────┴──────┴──────┴──────┘ │
-└─────────────────────────────────────────────────────┘
-```
+![ICOS Ecosystem FLUXNET data browser](screenshot_1.png)
 
 ## Quick Start
 
