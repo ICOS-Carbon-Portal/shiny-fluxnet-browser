@@ -94,3 +94,7 @@ This app queries **ICOS ETC Level 2 FLUXNET** data products from the [ICOS Carbo
 ## License
 
 This project is open source. See the repository for licence details.
+
+## Acknowledgements
+
+This application was developed with the assistance of [Claude Opus 4.6](https://www.anthropic.com/) (Anthropic).
