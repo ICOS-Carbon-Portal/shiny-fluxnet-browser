@@ -779,8 +779,8 @@ def server(input, output, session):
             "title": plot_title,
             "xaxis": xaxis_config,
             "barmode": "group",
-            "legend": {"orientation": "h", "yanchor": "bottom", "y": 1.02, "x": 0},
-            "margin": {"l": 90, "r": 110, "t": 60, "b": 60},
+            "legend": {"orientation": "h", "yanchor": "top", "y": -0.15, "x": 0},
+            "margin": {"l": 90, "r": 110, "t": 60, "b": 80},
             "autosize": True,
         }
 
