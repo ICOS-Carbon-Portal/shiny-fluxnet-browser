@@ -293,10 +293,27 @@ app_ui = ui.page_fluid(
             ui.input_checkbox("x_auto", "Auto scale x-axis", value=True),
             ui.input_text("x_min", "Manual x min", placeholder="YYYY-MM-DD HH:MM"),
             ui.input_text("x_max", "Manual x max", placeholder="YYYY-MM-DD HH:MM"),
+            ui.hr(),
+            ui.h5("Y-axis scales"),
+            *[
+                item
+                for ax in range(1, 5)
+                for item in (
+                    ui.input_checkbox(f"y{ax}_auto", f"Axis {ax} auto", value=True),
+                    ui.row(
+                        ui.column(6, ui.input_text(f"y{ax}_min", "Min", placeholder="")),
+                        ui.column(6, ui.input_text(f"y{ax}_max", "Max", placeholder="")),
+                    ),
+                )
+            ],
             width=360,
         ),
         ui.div(
             ui.output_text_verbatim("status"),
+            ui.row(
+                ui.column(10),
+                ui.column(2, ui.download_button("download_pdf", "Export PDF", class_="btn-sm btn-outline-secondary")),
+            ),
             output_widget("ts_plot", height="50vh"),
             ui.hr(),
             ui.row(*[ui.column(4, series_controls(i)) for i in range(1, MAX_SERIES + 1)]),
@@ -331,6 +348,8 @@ def server(input, output, session):
     _icos_name: reactive.Value[str] = reactive.value("")
     # Track temp file paths so we can delete previous downloads/uploads
     _prev_temp_paths: reactive.Value[list[str]] = reactive.value([])
+    # Store current figure for PDF export
+    _current_fig: reactive.Value[Optional[go.Figure]] = reactive.value(None)
 
     @reactive.effect
     @reactive.event(input.icos_query)
@@ -613,15 +632,80 @@ def server(input, output, session):
                 "color": input[f"color_{slot}"](),
                 "yaxis": input[f"yaxis_{slot}"](),
             })
+        yaxes = {}
+        for ax in range(1, 5):
+            yaxes[ax] = {
+                "auto": input[f"y{ax}_auto"](),
+                "min": input[f"y{ax}_min"](),
+                "max": input[f"y{ax}_max"](),
+            }
         return {
             "view_mode": input.view_mode(),
             "x_auto": input.x_auto(),
             "x_min": input.x_min(),
             "x_max": input.x_max(),
+            "yaxes": yaxes,
             "series": series,
         }
 
     # Manual debounce: copy _plot_inputs into a reactive.Value after 1.5s of inactivity
+    @reactive.effect
+    def _update_yaxis_ranges():
+        """Populate y-axis min/max fields with computed data ranges when auto is on."""
+        df = filtered_df()
+        if df is None or df.empty:
+            return
+        dt_col = input.dt_col()
+        view_mode = input.view_mode()
+        is_profile = view_mode != "timeseries"
+
+        # Collect min/max per axis from plotted series
+        axis_mins: dict[int, float] = {}
+        axis_maxs: dict[int, float] = {}
+        for slot in range(1, MAX_SERIES + 1):
+            col = input[f"col_{slot}"]()
+            if not col or col not in df.columns:
+                continue
+            agg = input[f"agg_{slot}"]()
+            try:
+                ax = int(input[f"yaxis_{slot}"]())
+            except Exception:
+                ax = 1
+            ax = max(1, min(4, ax))
+
+            if is_profile:
+                _, y_vals, _ = profile_series(df, dt_col, col, view_mode)
+                vals = y_vals.dropna()
+            else:
+                agg_data = aggregate_series(df, dt_col, col, agg)
+                if agg_data.empty:
+                    continue
+                vals = agg_data[col].dropna()
+
+            if vals.empty:
+                continue
+            vmin = float(vals.min())
+            vmax = float(vals.max())
+            axis_mins[ax] = min(axis_mins.get(ax, vmin), vmin)
+            axis_maxs[ax] = max(axis_maxs.get(ax, vmax), vmax)
+
+        for ax in range(1, 5):
+            with reactive.isolate():
+                is_auto = input[f"y{ax}_auto"]()
+            if is_auto and ax in axis_mins:
+                # Round to reasonable precision
+                lo = axis_mins[ax]
+                hi = axis_maxs[ax]
+                # Add a small 5% padding like Plotly does
+                span = hi - lo if hi != lo else abs(hi) * 0.1 or 1.0
+                lo_padded = lo - span * 0.05
+                hi_padded = hi + span * 0.05
+                ui.update_text(f"y{ax}_min", value=f"{lo_padded:.4g}")
+                ui.update_text(f"y{ax}_max", value=f"{hi_padded:.4g}")
+            elif is_auto:
+                ui.update_text(f"y{ax}_min", value="")
+                ui.update_text(f"y{ax}_max", value="")
+
     @output
     @render_widget
     def ts_plot():
@@ -734,7 +818,7 @@ def server(input, output, session):
             used_axes.add(axis_num)
             trace_count += 1
 
-        xaxis_config = {"title": dt_col}
+        xaxis_config = {"title": dt_col, "showline": True, "mirror": True, "ticks": "outside", "ticklen": 4, "linewidth": 1, "linecolor": "black"}
         if is_profile:
             # Use a category axis for profile views
             x_label_map = {
@@ -743,7 +827,7 @@ def server(input, output, session):
                 "week": "Week of year",
                 "month": "Month",
             }
-            xaxis_config = {"title": x_label_map.get(view_mode, ""), "type": "category"}
+            xaxis_config = {"title": x_label_map.get(view_mode, ""), "type": "category", "showline": True, "mirror": True, "ticks": "outside", "ticklen": 4, "linewidth": 1, "linecolor": "black"}
         elif not input.x_auto():
             x_min = parse_opt_datetime(params["x_min"])
             x_max = parse_opt_datetime(params["x_max"])
@@ -784,11 +868,35 @@ def server(input, output, session):
             "autosize": True,
         }
 
+        def _yaxis_range(ax_num: int) -> dict:
+            """Return range dict for a y-axis if manual min/max are set."""
+            ya = params["yaxes"][ax_num]
+            if ya["auto"]:
+                return {}
+            rng = [None, None]
+            try:
+                v = ya["min"].strip()
+                if v:
+                    rng[0] = float(v)
+            except (ValueError, AttributeError):
+                pass
+            try:
+                v = ya["max"].strip()
+                if v:
+                    rng[1] = float(v)
+            except (ValueError, AttributeError):
+                pass
+            if rng[0] is not None or rng[1] is not None:
+                return {"range": rng}
+            return {}
+
         if 1 in used_axes or trace_count == 0:
             layout_update["yaxis"] = {
                 "title": ", ".join(sorted(axis_labels[1])) or "Axis 1",
                 "side": "left",
                 "showgrid": True,
+                "showline": True, "mirror": True, "ticks": "outside", "ticklen": 4, "linewidth": 1, "linecolor": "black",
+                **_yaxis_range(1),
             }
 
         if 2 in used_axes:
@@ -797,6 +905,8 @@ def server(input, output, session):
                 "overlaying": "y",
                 "side": "right",
                 "showgrid": False,
+                "showline": True, "ticks": "outside", "ticklen": 4, "linewidth": 1, "linecolor": "black", "linecolor": "black",
+                **_yaxis_range(2),
             }
 
         if 3 in used_axes:
@@ -809,6 +919,8 @@ def server(input, output, session):
                 "showgrid": False,
                 "autoshift": True,
                 "shift": -1,
+                "showline": True, "ticks": "outside", "ticklen": 4, "linewidth": 1, "linecolor": "black", "linecolor": "black",
+                **_yaxis_range(3),
             }
 
         if 4 in used_axes:
@@ -821,6 +933,8 @@ def server(input, output, session):
                 "showgrid": False,
                 "autoshift": True,
                 "shift": 1,
+                "showline": True, "ticks": "outside", "ticklen": 4, "linewidth": 1, "linecolor": "black",
+                **_yaxis_range(4),
             }
 
         fig.update_layout(**layout_update)
@@ -835,7 +949,19 @@ def server(input, output, session):
                 showarrow=False,
             )
 
+        _current_fig.set(fig)
         return fig
+
+
+    @render.download(filename=lambda: "plot.pdf")
+    def download_pdf():
+        fig = _current_fig.get()
+        if fig is None:
+            return
+        buf = io.BytesIO()
+        fig.write_image(buf, format="pdf", width=1200, height=700, scale=2)
+        buf.seek(0)
+        yield buf.read()
 
 
 app = App(app_ui, server)
