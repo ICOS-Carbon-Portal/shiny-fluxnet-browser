@@ -289,16 +289,17 @@ app_ui = ui.page_fluid(
         " .btn:hover { background-color: #008fa8 !important; border-color: #008fa8 !important; }"
         " .progress-bar, .shiny-busy .progress-bar,"
         " .shiny-notification-bar .progress-bar,"
-        " .shiny-busy-indicator,"
-        " [data-shiny-busy-spinners],"
+        " .shiny-busy-indicator"
+        " { background-color: red !important; background: red !important; color: red !important; }"
         " [data-shiny-busy-spinners]::before,"
         " [data-shiny-busy-spinners]::after"
-        " { background-color: red !important; background: red !important;"
-        "   --jp-brand-color1: red !important;"
-        "   --jp-widgets-slider-active-handle-color: red !important;"
-        "   color: red !important; }"
+        " { background-color: red !important; background: red !important; }"
         " :root { --jp-brand-color1: red !important;"
         "   --jp-widgets-slider-active-handle-color: red !important; }"
+        " .bslib-page-fill > footer, .bslib-page-fill > nav,"
+        " .navbar, .navbar-default, .navbar-fixed-bottom,"
+        " footer, [class*='footer']"
+        " { background-color: #00ABC9 !important; color: #fff !important; }"
         + _COLOR_OPTION_CSS
     ),
     ui.layout_sidebar(
