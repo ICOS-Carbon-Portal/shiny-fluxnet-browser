@@ -23,8 +23,6 @@ A **Shiny for Python** web application for interactive time series analysis of [
 
 ![ICOS Ecosystem FLUXNET data browser](Screenshot_1.png)
 
-![ICOS Ecosystem FLUXNET data browser](Screenshot_2.png)
-
 ## Quick Start
 
 ### Prerequisites

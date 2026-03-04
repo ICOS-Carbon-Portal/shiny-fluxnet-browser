@@ -119,6 +119,27 @@ def _read_csv_flexible(buf: io.BytesIO) -> pd.DataFrame:
     return pd.read_csv(buf, sep=";")
 
 
+def icos_fetch_metadata(dobj_url: str) -> dict:
+    """Fetch JSON metadata from an ICOS data object landing page via content negotiation.
+
+    Returns a dict with 'citation' and 'station_id' keys.
+    """
+    try:
+        resp = requests.get(dobj_url, headers={"Accept": "application/json"}, timeout=30)
+        resp.raise_for_status()
+        meta = resp.json()
+        citation = meta.get("references", {}).get("citationString", "")
+        station_id = (
+            meta.get("specificInfo", {})
+            .get("acquisition", {})
+            .get("station", {})
+            .get("id", "")
+        )
+        return {"citation": citation, "station_id": station_id}
+    except Exception:
+        return {"citation": "", "station_id": ""}
+
+
 def icos_download_csv(dobj_url: str) -> pd.DataFrame:
     """Download a data object from the ICOS Carbon Portal and return a DataFrame.
 
@@ -209,7 +230,7 @@ def smart_parse_datetime(series: pd.Series) -> pd.Series:
 
 def series_controls(slot: int) -> ui.Tag:
     return ui.card(
-        ui.card_header(f"Series {slot}"),
+        ui.card_header(ui.output_text(f"header_{slot}", inline=True)),
         ui.input_select(f"col_{slot}", "Column", choices={"": "(none)"}, selected=""),
         ui.input_select(f"agg_{slot}", "Averaging", choices=AGG_CHOICES, selected="raw"),
         ui.input_select(f"chart_{slot}", "Chart type", choices=CHART_CHOICES, selected="line"),
@@ -276,6 +297,7 @@ app_ui = ui.page_fluid(
         " .yax-group .row { margin-top: -2px !important; }"
         " .sidebar h5 { margin-bottom: 0 !important; margin-top: 2px !important; font-size: 10pt !important; font-weight: bold !important; }"
         " .sidebar hr { margin: 2px 0 !important; }"
+        " #file2_series_row { display: none; }"
         " #ts_plot { min-height: 50vh !important; height: 50vh !important; }"
         " #ts_plot > div, #ts_plot iframe,"
         " #ts_plot .plotly, #ts_plot .plot-container,"
@@ -309,6 +331,10 @@ app_ui = ui.page_fluid(
             ui.output_text_verbatim("icos_status"),
             ui.input_select("icos_file", "ICOS file", choices={}),
             ui.input_action_button("icos_load", "Download & load", class_="btn-sm btn-outline-success"),
+            ui.hr(),
+            ui.h5("Second ICOS file (optional)"),
+            ui.input_select("icos_file2", "ICOS file 2", choices={}),
+            ui.input_action_button("icos_load2", "Download & load file 2", class_="btn-sm btn-outline-success"),
             ui.hr(),
             ui.h5("Or upload local file"),
             ui.input_file("data_file", "Data file (.csv, .xlsx, .zip)", accept=[".csv", ".xlsx", ".xls", ".zip"]),
@@ -347,8 +373,13 @@ app_ui = ui.page_fluid(
                 ui.column(2, ui.download_button("download_pdf", "Export PDF", class_="btn-sm btn-outline-secondary")),
             ),
             output_widget("ts_plot", height="50vh"),
+            ui.output_ui("citation_text"),
             ui.hr(),
-            ui.row(*[ui.column(4, series_controls(i)) for i in range(1, MAX_SERIES + 1)]),
+            ui.row(*[ui.column(4, series_controls(i)) for i in range(1, 4)]),
+            ui.div(
+                ui.row(*[ui.column(4, series_controls(i)) for i in range(4, MAX_SERIES + 1)]),
+                id="file2_series_row",
+            ),
         ),
     ),
 )
@@ -382,6 +413,14 @@ def server(input, output, session):
     _prev_temp_paths: reactive.Value[list[str]] = reactive.value([])
     # Store current figure for PDF export
     _current_fig: reactive.Value[Optional[go.Figure]] = reactive.value(None)
+    # ICOS citation metadata
+    _icos_citation: reactive.Value[str] = reactive.value("")
+    _icos_station_id: reactive.Value[str] = reactive.value("")
+    # --- Second ICOS file state ---
+    _icos_df2: reactive.Value[Optional[pd.DataFrame]] = reactive.value(None)
+    _icos_name2: reactive.Value[str] = reactive.value("")
+    _icos_citation2: reactive.Value[str] = reactive.value("")
+    _icos_station_id2: reactive.Value[str] = reactive.value("")
 
     @reactive.effect
     @reactive.event(input.icos_query)
@@ -391,6 +430,7 @@ def server(input, output, session):
             _icos_files.set(files)
             choices = {url: name for url, name in files.items()}
             ui.update_select("icos_file", choices=choices)
+            ui.update_select("icos_file2", choices={"":"", **choices})
         except Exception as exc:
             _icos_files.set({})
             ui.notification_show(f"ICOS query failed: {exc}", type="error")
@@ -425,9 +465,68 @@ def server(input, output, session):
             _icos_df.set(df)
             files = _icos_files.get()
             _icos_name.set(files.get(url, "ICOS"))
+            # Fetch metadata (citation + station id) via content negotiation
+            meta = icos_fetch_metadata(url)
+            _icos_citation.set(meta["citation"])
+            _icos_station_id.set(meta["station_id"])
             ui.notification_show(f"Loaded {len(df)} rows from ICOS.", type="message")
         except Exception as exc:
             ui.notification_show(f"Download failed: {exc}", type="error")
+
+    @reactive.effect
+    @reactive.event(input.icos_load2)
+    def _do_icos_download2():
+        url = input.icos_file2()
+        if not url:
+            return
+        try:
+            df = icos_download_csv(url)
+            _icos_df2.set(df)
+            files = _icos_files.get()
+            _icos_name2.set(files.get(url, "ICOS"))
+            meta = icos_fetch_metadata(url)
+            _icos_citation2.set(meta["citation"])
+            _icos_station_id2.set(meta["station_id"])
+            ui.notification_show(f"Loaded {len(df)} rows from ICOS (file 2).", type="message")
+        except Exception as exc:
+            ui.notification_show(f"Download file 2 failed: {exc}", type="error")
+
+    @reactive.calc
+    def raw_df2() -> Optional[pd.DataFrame]:
+        """Return the second ICOS file dataframe."""
+        icos2 = _icos_df2.get()
+        if icos2 is not None and not icos2.empty:
+            return icos2
+        return None
+
+    @reactive.calc
+    def parsed_df2() -> Optional[pd.DataFrame]:
+        df = raw_df2()
+        if df is None or df.empty:
+            return None
+        dt_col = guess_datetime_col(df)
+        if not dt_col or dt_col not in df.columns:
+            return None
+        out = df.copy()
+        out[dt_col] = smart_parse_datetime(out[dt_col])
+        out = out.dropna(subset=[dt_col]).sort_values(dt_col)
+        return out
+
+    @reactive.calc
+    def filtered_df2() -> Optional[pd.DataFrame]:
+        df = parsed_df2()
+        if df is None or df.empty:
+            return None
+        dt_col = guess_datetime_col(df)
+        if not dt_col:
+            return df
+        start = parse_opt_datetime(input.start_ts())
+        end = parse_opt_datetime(input.end_ts())
+        if start is not None and not pd.isna(start):
+            df = df[df[dt_col] >= start]
+        if end is not None and not pd.isna(end):
+            df = df[df[dt_col] <= end]
+        return df
 
     @reactive.calc
     def raw_df() -> Optional[pd.DataFrame]:
@@ -466,26 +565,41 @@ def server(input, output, session):
     @reactive.effect
     def _update_column_inputs() -> None:
         df = raw_df()
-        if df is None or df.empty:
-            return
+        if df is not None and not df.empty:
+            all_cols = [str(c) for c in df.columns]
+            numeric_cols = [str(c) for c in df.select_dtypes(include="number").columns]
+            if not numeric_cols:
+                numeric_cols = all_cols
 
-        all_cols = [str(c) for c in df.columns]
-        numeric_cols = [str(c) for c in df.select_dtypes(include="number").columns]
-        if not numeric_cols:
-            numeric_cols = all_cols
+            best_dt = guess_datetime_col(df)
+            ui.update_select("dt_col", choices={c: c for c in all_cols}, selected=best_dt)
 
-        best_dt = guess_datetime_col(df)
-        ui.update_select("dt_col", choices={c: c for c in all_cols}, selected=best_dt)
+            col_choices = {"": "(none)"}
+            col_choices.update({c: c for c in numeric_cols})
 
-        col_choices = {"": "(none)"}
-        col_choices.update({c: c for c in numeric_cols})
+            for slot in range(1, 4):  # Series 1-3: first file
+                with reactive.isolate():
+                    current = input[f"col_{slot}"]()
+                sel = current if current and current in col_choices else ""
+                ui.update_select(f"col_{slot}", choices=col_choices, selected=sel)
 
-        for slot in range(1, MAX_SERIES + 1):
-            with reactive.isolate():
-                current = input[f"col_{slot}"]()
-            # Keep current selection if the column still exists in the new file
-            sel = current if current and current in col_choices else ""
-            ui.update_select(f"col_{slot}", choices=col_choices, selected=sel)
+        # Series 4-6: second file
+        df2 = raw_df2()
+        if df2 is not None and not df2.empty:
+            numeric_cols2 = [str(c) for c in df2.select_dtypes(include="number").columns]
+            if not numeric_cols2:
+                numeric_cols2 = [str(c) for c in df2.columns]
+            col_choices2 = {"": "(none)"}
+            col_choices2.update({c: c for c in numeric_cols2})
+            for slot in range(4, MAX_SERIES + 1):
+                with reactive.isolate():
+                    current = input[f"col_{slot}"]()
+                sel = current if current and current in col_choices2 else ""
+                ui.update_select(f"col_{slot}", choices=col_choices2, selected=sel)
+        else:
+            # Clear series 4-6 choices when no second file
+            for slot in range(4, MAX_SERIES + 1):
+                ui.update_select(f"col_{slot}", choices={"": "(none)"}, selected="")
 
     @reactive.effect
     @reactive.event(input.view_mode)
@@ -582,6 +696,76 @@ def server(input, output, session):
         min_ts = df[dt_col].min()
         max_ts = df[dt_col].max()
         return f"Rows: {len(df):,} | Range: {min_ts} -> {max_ts}"
+
+    @output
+    @render.ui
+    def citation_text():
+        citation = _icos_citation.get()
+        station_id = _icos_station_id.get()
+        citation2 = _icos_citation2.get()
+        station_id2 = _icos_station_id2.get()
+        if not citation and not station_id and not citation2 and not station_id2:
+            return ui.div()
+        lines = [ui.p("ICOS data is licensed by CC BY 4.0.", style="margin: 0;")]
+        if station_id or citation:
+            parts = []
+            if station_id:
+                parts.append(f"Station {station_id}.")
+            if citation:
+                parts.append(f"Please cite as: {citation}")
+            lines.append(ui.p(" ".join(parts), style="margin: 0;"))
+        if station_id2 or citation2:
+            parts2 = []
+            if station_id2:
+                parts2.append(f"Station {station_id2}.")
+            if citation2:
+                parts2.append(f"Please cite as: {citation2}")
+            lines.append(ui.p(" ".join(parts2), style="margin: 0;"))
+        return ui.div(
+            *lines,
+            style="font-size: 8pt; margin-top: 4px; color: #555;",
+        )
+
+    # --- Dynamic series panel headers ---
+    def _make_header_renderer(slot: int):
+        @output(id=f"header_{slot}")
+        @render.text
+        def _():
+            col = input[f"col_{slot}"]()
+            if slot <= 3:
+                sid = _icos_station_id.get()
+            else:
+                sid = _icos_station_id2.get()
+            label = f"Series {slot}"
+            if sid and col:
+                label = f"{sid} {col}"
+            elif sid:
+                label = f"{sid} (Series {slot})"
+            elif col:
+                label = f"Series {slot}: {col}"
+            return label
+
+    for _slot in range(1, MAX_SERIES + 1):
+        _make_header_renderer(_slot)
+
+    # --- Hide/show series 4-6 row based on second file availability ---
+    @reactive.effect
+    def _toggle_file2_series():
+        has_file2 = raw_df2() is not None
+        if has_file2:
+            ui.insert_ui(
+                ui.tags.style("#file2_series_row { display: block !important; }", id="file2_show_css"),
+                selector="head",
+                where="beforeEnd",
+            )
+            ui.remove_ui("#file2_hide_css")
+        else:
+            ui.insert_ui(
+                ui.tags.style("#file2_series_row { display: none !important; }", id="file2_hide_css"),
+                selector="head",
+                where="beforeEnd",
+            )
+            ui.remove_ui("#file2_show_css")
 
     def aggregate_series(frame: pd.DataFrame, dt_col: str, value_col: str, agg: str) -> pd.DataFrame:
         series = frame[[dt_col, value_col]].copy()
@@ -687,9 +871,9 @@ def server(input, output, session):
     def _update_yaxis_ranges():
         """Populate y-axis min/max fields with computed data ranges when auto is on."""
         df = filtered_df()
-        if df is None or df.empty:
-            return
+        df2 = filtered_df2()
         dt_col = input.dt_col()
+        dt_col2 = guess_datetime_col(df2) if df2 is not None and not df2.empty else None
         view_mode = input.view_mode()
         is_profile = view_mode != "timeseries"
 
@@ -698,7 +882,18 @@ def server(input, output, session):
         axis_maxs: dict[int, float] = {}
         for slot in range(1, MAX_SERIES + 1):
             col = input[f"col_{slot}"]()
-            if not col or col not in df.columns:
+            # Pick correct dataframe and dt col per slot
+            if slot <= 3:
+                sdf_base = df
+                s_dt_col = dt_col
+            else:
+                sdf_base = df2
+                s_dt_col = dt_col2
+            if sdf_base is None or sdf_base.empty:
+                continue
+            if not s_dt_col or s_dt_col not in sdf_base.columns:
+                continue
+            if not col or col not in sdf_base.columns:
                 continue
             agg = input[f"agg_{slot}"]()
             try:
@@ -709,13 +904,13 @@ def server(input, output, session):
 
             # QC filtering
             qc_col = f"{col}_QC"
-            sdf = df[~df[qc_col].isin([2, 3])] if qc_col in df.columns else df
+            sdf = sdf_base[~sdf_base[qc_col].isin([2, 3])] if qc_col in sdf_base.columns else sdf_base
 
             if is_profile:
-                _, y_vals, _ = profile_series(sdf, dt_col, col, view_mode)
+                _, y_vals, _ = profile_series(sdf, s_dt_col, col, view_mode)
                 vals = y_vals.dropna()
             else:
-                agg_data = aggregate_series(sdf, dt_col, col, agg)
+                agg_data = aggregate_series(sdf, s_dt_col, col, agg)
                 if agg_data.empty:
                     continue
                 vals = agg_data[col].dropna()
@@ -777,12 +972,31 @@ def server(input, output, session):
         trace_count = 0
         bar_offset = 0  # counter for offsetgroup so grouped bars don't overlap
 
+        # Second file filtered data (for series 4-6)
+        df2 = filtered_df2()
+        # Guess dt col for second file
+        dt_col2 = None
+        if df2 is not None and not df2.empty:
+            dt_col2 = guess_datetime_col(df2)
+
         for slot in range(1, MAX_SERIES + 1):
             s = params["series"][slot - 1]
             value_col = s["col"]
             if not value_col:
                 continue
-            if value_col not in df.columns:
+
+            # Select appropriate dataframe and datetime column
+            if slot <= 3:
+                slot_df = df
+                slot_dt_col = dt_col
+            else:
+                slot_df = df2
+                slot_dt_col = dt_col2
+            if slot_df is None or slot_df.empty:
+                continue
+            if not slot_dt_col or slot_dt_col not in slot_df.columns:
+                continue
+            if value_col not in slot_df.columns:
                 continue
 
             agg = s["agg"]
@@ -799,25 +1013,26 @@ def server(input, output, session):
             # QC filtering: if a companion column <value_col>_QC exists,
             # set values to NaN where the QC value is 2 or 3 (creates gaps in line plots).
             qc_col = f"{value_col}_QC"
-            if qc_col in df.columns:
-                series_df = df.copy()
+            if qc_col in slot_df.columns:
+                series_df = slot_df.copy()
                 series_df.loc[series_df[qc_col].isin([2, 3]), value_col] = float("nan")
             else:
-                series_df = df
+                series_df = slot_df
 
-            data = aggregate_series(series_df, dt_col, value_col, agg)
+            data = aggregate_series(series_df, slot_dt_col, value_col, agg)
             if data.empty:
                 continue
 
             yref = "y" if axis_num == 1 else f"y{axis_num}"
-            name = f"{value_col} ({agg})"
+            sid = _icos_station_id.get() if slot <= 3 else _icos_station_id2.get()
+            name = f"{sid} {value_col} ({agg})" if sid else f"{value_col} ({agg})"
 
             if is_profile:
                 # ---- Profile view ----
-                x_vals, y_vals, x_label = profile_series(series_df, dt_col, value_col, view_mode)
+                x_vals, y_vals, x_label = profile_series(series_df, slot_dt_col, value_col, view_mode)
                 if y_vals.empty:
                     continue
-                name = f"{value_col} (profile)"
+                name = f"{sid} {value_col} (profile)" if sid else f"{value_col} (profile)"
                 # Convert x to list of strings for consistent category matching
                 x_cat = [str(v) for v in x_vals.values]
                 if chart == "bar":
@@ -842,7 +1057,7 @@ def server(input, output, session):
                     )
             elif agg == "monthly" and chart == "bar":
                 fig.add_bar(
-                    x=data[dt_col],
+                    x=data[slot_dt_col],
                     y=data[value_col],
                     name=name,
                     marker_color=color,
@@ -853,7 +1068,7 @@ def server(input, output, session):
                 bar_offset += 1
             else:
                 fig.add_scatter(
-                    x=data[dt_col],
+                    x=data[slot_dt_col],
                     y=data[value_col],
                     mode="lines",
                     name=name,
