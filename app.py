@@ -342,6 +342,13 @@ app_ui = ui.page_fluid(
         " .sidebar h5 { margin-bottom: 0 !important; margin-top: 2px !important; font-size: 10pt !important; font-weight: bold !important; }"
         " .sidebar hr { margin: 2px 0 !important; }"
         " #file2_series_row { display: none; }"
+        " #ts_plot_wrap { position:relative; }"
+        " #ts_plot_overlay {"
+        "   display:none; position:absolute; inset:0;"
+        "   background:rgba(255,255,255,0.65); z-index:10;"
+        "   align-items:center; justify-content:center;"
+        "   font-size:11pt; color:#444; pointer-events:none; }"
+        " .shiny-busy #ts_plot_overlay { display:flex !important; }"
         " #ts_plot { min-height: 50vh !important; height: 50vh !important; }"
         " #ts_plot > div, #ts_plot iframe,"
         " #ts_plot .plotly, #ts_plot .plot-container,"
@@ -425,7 +432,11 @@ app_ui = ui.page_fluid(
                 ui.column(10),
                 ui.column(2, ui.download_button("download_pdf", "Export PDF", class_="btn-sm btn-outline-secondary")),
             ),
-            output_widget("ts_plot", height="50vh"),
+            ui.div(
+                output_widget("ts_plot", height="50vh"),
+                ui.div("Computing…", id="ts_plot_overlay"),
+                id="ts_plot_wrap",
+            ),
             ui.hr(),
             ui.row(*[ui.column(4, series_controls(i)) for i in range(1, 4)]),
             ui.div(
@@ -457,6 +468,13 @@ def _read_from_zip(zip_path: Path) -> Optional[pd.DataFrame]:
 
 
 def server(input, output, session):
+    # --- Column selections (reactive store to avoid browser round-trip redraws) ---
+    _col_selections: reactive.Value[dict[str, str]] = reactive.value(
+        {f"col_{slot}": "" for slot in range(1, MAX_SERIES + 1)}
+    )
+    # --- Y-axis manual overrides from config load (prevents auto-computation race) ---
+    _yaxis_from_config: reactive.Value[Optional[dict]] = reactive.value(None)
+
     # --- ICOS state ---
     _icos_files: reactive.Value[dict[str, str]] = reactive.value({})
     _icos_df: reactive.Value[Optional[pd.DataFrame]] = reactive.value(None)
@@ -603,6 +621,13 @@ def server(input, output, session):
                 return
         # Apply non-column settings immediately
         _apply_config(cfg)
+        # Protect manual y-axis values from being overwritten by _update_yaxis_ranges()
+        # which runs when new data triggers filtered_df() but before y_auto round-trips land
+        yaxis_cfg: dict[int, dict] = {}
+        for ax in range(1, 5):
+            if f"y{ax}_auto" in cfg and not cfg[f"y{ax}_auto"]:
+                yaxis_cfg[ax] = {"min": cfg.get(f"y{ax}_min", ""), "max": cfg.get(f"y{ax}_max", "")}
+        _yaxis_from_config.set(yaxis_cfg if yaxis_cfg else None)
         # Store config for deferred column application (must be set before data so
         # _update_column_inputs sees it when raw_df() triggers the effect)
         _pending_config.set(cfg)
@@ -789,6 +814,11 @@ def server(input, output, session):
         with reactive.isolate():
             pending = _pending_config.get()
         df = raw_df()
+
+        # Build new selections dict; start from current to preserve unchanged slots
+        with reactive.isolate():
+            new_cols: dict[str, str] = dict(_col_selections.get())
+
         if df is not None and not df.empty:
             all_cols = [str(c) for c in df.columns]
             numeric_cols = [str(c) for c in df.select_dtypes(include="number").columns]
@@ -806,13 +836,13 @@ def server(input, output, session):
             col_choices.update({c: c for c in numeric_cols})
 
             for slot in range(1, 4):  # Series 1-3: first file
-                # Use pending config column if available
                 if pending and pending.get(f"col_{slot}") and pending[f"col_{slot}"] in col_choices:
                     sel = pending[f"col_{slot}"]
                 else:
                     with reactive.isolate():
                         current = input[f"col_{slot}"]()
                     sel = current if current and current in col_choices else ""
+                new_cols[f"col_{slot}"] = sel
                 ui.update_select(f"col_{slot}", choices=col_choices, selected=sel)
 
         # Series 4-6: second file
@@ -830,15 +860,36 @@ def server(input, output, session):
                     with reactive.isolate():
                         current = input[f"col_{slot}"]()
                     sel = current if current and current in col_choices2 else ""
+                new_cols[f"col_{slot}"] = sel
                 ui.update_select(f"col_{slot}", choices=col_choices2, selected=sel)
         else:
             # Clear series 4-6 choices when no second file
             for slot in range(4, MAX_SERIES + 1):
+                new_cols[f"col_{slot}"] = ""
                 ui.update_select(f"col_{slot}", choices={"": "(none)"}, selected="")
+
+        # Atomically update store — one reactive write instead of 6 browser round-trips
+        with reactive.isolate():
+            current_cols = _col_selections.get()
+        if new_cols != current_cols:
+            _col_selections.set(new_cols)
 
         # Clear pending config after applying column selections
         if pending:
             _pending_config.set(None)
+
+    # Sync user-driven dropdown changes back to the store (without causing extra redraws)
+    def _make_col_sync(slot: int):
+        @reactive.effect
+        def _sync_col():
+            val = input[f"col_{slot}"]()
+            with reactive.isolate():
+                current = _col_selections.get()
+            if current.get(f"col_{slot}") != val:
+                _col_selections.set({**current, f"col_{slot}": val})
+
+    for _cslot in range(1, MAX_SERIES + 1):
+        _make_col_sync(_cslot)
 
     @reactive.effect
     @reactive.event(input.view_mode)
@@ -876,10 +927,10 @@ def server(input, output, session):
                 choices = {"line": "Line", "bar": "Bar"}
             else:
                 choices = {"line": "Line"}
-            with reactive.isolate():
-                current = input[f"chart_{slot}"]()
-            sel = current if current in choices else "line"
-            ui.update_select(f"chart_{slot}", choices=choices, selected=sel)
+            # Don't specify selected — let Shiny preserve the current browser value
+            # if it's valid, or fall back to "line" automatically. This prevents
+            # round-trip timing from overwriting a config-applied "bar" selection.
+            ui.update_select(f"chart_{slot}", choices=choices)
 
     @reactive.calc
     def parsed_df() -> Optional[pd.DataFrame]:
@@ -1055,10 +1106,11 @@ def server(input, output, session):
     @reactive.calc
     def _plot_inputs():
         """Collect all inputs that affect the plot into a single dict."""
+        col_sels = _col_selections.get()
         series = []
         for slot in range(1, MAX_SERIES + 1):
             series.append({
-                "col": input[f"col_{slot}"](),
+                "col": col_sels.get(f"col_{slot}", ""),
                 "agg": input[f"agg_{slot}"](),
                 "chart": input[f"chart_{slot}"](),
                 "dash": input[f"dash_{slot}"](),
@@ -1067,11 +1119,17 @@ def server(input, output, session):
             })
         yaxes = {}
         for ax in range(1, 5):
-            yaxes[ax] = {
-                "auto": input[f"y{ax}_auto"](),
-                "min": input[f"y{ax}_min"](),
-                "max": input[f"y{ax}_max"](),
-            }
+            auto = input[f"y{ax}_auto"]()
+            if auto:
+                # Don't read min/max inputs when auto — avoids redraws from
+                # ui.update_text() calls in _update_yaxis_ranges()
+                yaxes[ax] = {"auto": True, "min": "", "max": ""}
+            else:
+                yaxes[ax] = {
+                    "auto": False,
+                    "min": input[f"y{ax}_min"](),
+                    "max": input[f"y{ax}_max"](),
+                }
         return {
             "view_mode": input.view_mode(),
             "x_auto": input.x_auto(),
@@ -1081,7 +1139,6 @@ def server(input, output, session):
             "series": series,
         }
 
-    # Manual debounce: copy _plot_inputs into a reactive.Value after 1.5s of inactivity
     @reactive.effect
     def _update_yaxis_ranges():
         """Populate y-axis min/max fields with computed data ranges when auto is on."""
@@ -1137,7 +1194,14 @@ def server(input, output, session):
             axis_mins[ax] = min(axis_mins.get(ax, vmin), vmin)
             axis_maxs[ax] = max(axis_maxs.get(ax, vmax), vmax)
 
+        with reactive.isolate():
+            yaxis_cfg = _yaxis_from_config.get()
+
         for ax in range(1, 5):
+            # Config explicitly set this axis to manual — skip auto-computation
+            # so we don't race against the y_auto round-trip and overwrite the values
+            if yaxis_cfg and ax in yaxis_cfg:
+                continue
             with reactive.isolate():
                 is_auto = input[f"y{ax}_auto"]()
             if is_auto and ax in axis_mins:
@@ -1153,6 +1217,10 @@ def server(input, output, session):
             elif is_auto:
                 ui.update_text(f"y{ax}_min", value="")
                 ui.update_text(f"y{ax}_max", value="")
+
+        # Clear the config override after first use
+        if yaxis_cfg:
+            _yaxis_from_config.set(None)
 
     @output
     @render_widget
