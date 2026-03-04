@@ -287,6 +287,18 @@ app_ui = ui.page_fluid(
         " .card-header { background-color: #00ABC9 !important; color: #fff !important; }"
         " .btn { background-color: #00ABC9 !important; color: #fff !important; border-color: #00ABC9 !important; }"
         " .btn:hover { background-color: #008fa8 !important; border-color: #008fa8 !important; }"
+        " .progress-bar, .shiny-busy .progress-bar,"
+        " .shiny-notification-bar .progress-bar,"
+        " .shiny-busy-indicator,"
+        " [data-shiny-busy-spinners],"
+        " [data-shiny-busy-spinners]::before,"
+        " [data-shiny-busy-spinners]::after"
+        " { background-color: red !important; background: red !important;"
+        "   --jp-brand-color1: red !important;"
+        "   --jp-widgets-slider-active-handle-color: red !important;"
+        "   color: red !important; }"
+        " :root { --jp-brand-color1: red !important;"
+        "   --jp-widgets-slider-active-handle-color: red !important; }"
         + _COLOR_OPTION_CSS
     ),
     ui.layout_sidebar(
