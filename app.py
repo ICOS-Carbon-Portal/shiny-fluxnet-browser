@@ -199,6 +199,21 @@ def _icos_fetch(dobj_url: str) -> tuple[Path, dict]:
     if dobj_url in _icos_cache:
         _icos_cache.move_to_end(dobj_url)
         return _icos_cache[dobj_url]
+    hash_id = dobj_url.rstrip("/").rsplit("/", 1)[-1]
+    parquet_path = _PARQUET_DIR / f"{hash_id}.parquet"
+    meta_path = _PARQUET_DIR / f"{hash_id}.json"
+    # Warm from disk if both files survived a server restart (no network needed)
+    if parquet_path.exists() and meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            _icos_cache[dobj_url] = (parquet_path, meta)
+            if len(_icos_cache) > _ICOS_CACHE_MAX:
+                _, evicted = _icos_cache.popitem(last=False)
+                evicted[0].unlink(missing_ok=True)
+                evicted[0].with_suffix(".json").unlink(missing_ok=True)
+            return parquet_path, meta
+        except Exception:
+            pass  # corrupt sidecar — fall through to fresh download
     with ThreadPoolExecutor(max_workers=2) as pool:
         df_future = pool.submit(icos_download_csv, dobj_url)
         meta_future = pool.submit(icos_fetch_metadata, dobj_url)
@@ -212,13 +227,13 @@ def _icos_fetch(dobj_url: str) -> tuple[Path, dict]:
         df = df.dropna(subset=[dt_col]).sort_values(dt_col).reset_index(drop=True)
     meta["nrows"] = len(df)
     _PARQUET_DIR.mkdir(parents=True, exist_ok=True)
-    hash_id = dobj_url.rstrip("/").rsplit("/", 1)[-1]
-    parquet_path = _PARQUET_DIR / f"{hash_id}.parquet"
     pl.from_pandas(df).write_parquet(parquet_path)
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
     _icos_cache[dobj_url] = (parquet_path, meta)
     if len(_icos_cache) > _ICOS_CACHE_MAX:
         _, evicted = _icos_cache.popitem(last=False)
         evicted[0].unlink(missing_ok=True)
+        evicted[0].with_suffix(".json").unlink(missing_ok=True)
     return parquet_path, meta
 
 
@@ -874,25 +889,34 @@ def server(input, output, session):
         await session.send_custom_message("cfg_delete", {"name": name})
         ui.notification_show(f"Config '{name}' deleted.", type="message")
 
-    @reactive.effect
-    @reactive.event(input.icos_query)
-    def _do_icos_query():
+    def _run_icos_query():
         try:
             files = icos_query_files()
             _icos_files.set(files)
             choices = {url: name for url, name in files.items()}
             ui.update_select("icos_file", choices=choices)
-            ui.update_select("icos_file2", choices={"":"", **choices})
+            ui.update_select("icos_file2", choices={"": "", **choices})
+            ui.update_action_button("icos_query", disabled=True)
         except Exception as exc:
             _icos_files.set({})
             ui.notification_show(f"ICOS query failed: {exc}", type="error")
+
+    @reactive.effect
+    def _auto_icos_query():
+        """Run the ICOS file query automatically when the session starts."""
+        _run_icos_query()
+
+    @reactive.effect
+    @reactive.event(input.icos_query)
+    def _do_icos_query():
+        _run_icos_query()
 
     @output
     @render.text
     def icos_status() -> str:
         n = len(_icos_files.get())
         if n == 0:
-            return "Click 'Query ICOS files' to search."
+            return "Querying ICOS files…"
         return f"{n} files found."
 
     def _cleanup_temp_files():
