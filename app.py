@@ -5,6 +5,7 @@ import json
 import os
 import re
 import zipfile
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 
@@ -16,6 +17,11 @@ from shinywidgets import output_widget, render_widget
 
 MAX_SERIES = 6
 DEFAULT_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#e377c2"]
+
+_ICOS_CACHE_MAX = 20
+# LRU cache keyed by dobj_url; value is (DataFrame, metadata_dict).
+# Shared across all browser sessions for the lifetime of the server process.
+_icos_cache: OrderedDict[str, tuple[pd.DataFrame, dict]] = OrderedDict()
 
 COLOR_PALETTE = {
     "#1f77b4": "Blue",
@@ -172,6 +178,19 @@ def icos_download_csv(dobj_url: str) -> pd.DataFrame:
     # Not a zip – try reading as CSV directly.
     raw.seek(0)
     return _read_csv_flexible(raw)
+
+
+def _icos_fetch(dobj_url: str) -> tuple[pd.DataFrame, dict]:
+    """Return (DataFrame, metadata) for an ICOS data object, using an LRU cache."""
+    if dobj_url in _icos_cache:
+        _icos_cache.move_to_end(dobj_url)
+        return _icos_cache[dobj_url]
+    df = icos_download_csv(dobj_url)
+    meta = icos_fetch_metadata(dobj_url)
+    _icos_cache[dobj_url] = (df, meta)
+    if len(_icos_cache) > _ICOS_CACHE_MAX:
+        _icos_cache.popitem(last=False)  # evict least-recently-used
+    return df, meta
 
 
 def _looks_like_datetime(val) -> bool:
@@ -552,7 +571,14 @@ def server(input, output, session):
             if f"agg_{slot}" in cfg:
                 ui.update_select(f"agg_{slot}", selected=cfg[f"agg_{slot}"])
             if f"chart_{slot}" in cfg:
-                ui.update_select(f"chart_{slot}", selected=cfg[f"chart_{slot}"])
+                # Pre-expand choices to include "bar" when agg will be "monthly" so the
+                # browser can accept the selection immediately — avoids the round-trip race
+                # where "bar" arrives before the choices are expanded.
+                if cfg.get(f"agg_{slot}") == "monthly":
+                    chart_choices = {"line": "Line", "bar": "Bar"}
+                else:
+                    chart_choices = {"line": "Line"}
+                ui.update_select(f"chart_{slot}", choices=chart_choices, selected=cfg[f"chart_{slot}"])
             if f"dash_{slot}" in cfg:
                 ui.update_select(f"dash_{slot}", selected=cfg[f"dash_{slot}"])
             if f"color_{slot}" in cfg:
@@ -636,11 +662,10 @@ def server(input, output, session):
         if url1:
             try:
                 _cleanup_temp_files()
-                df = icos_download_csv(url1)
+                df, meta = _icos_fetch(url1)
                 _icos_df.set(df)
                 files = _icos_files.get()
                 _icos_name.set(files.get(url1, "ICOS"))
-                meta = icos_fetch_metadata(url1)
                 _icos_citation.set(meta["citation"])
                 _icos_station_id.set(meta["station_id"])
             except Exception as exc:
@@ -649,11 +674,10 @@ def server(input, output, session):
         url2 = cfg.get("icos_file2", "")
         if url2:
             try:
-                df2 = icos_download_csv(url2)
+                df2, meta2 = _icos_fetch(url2)
                 _icos_df2.set(df2)
                 files = _icos_files.get()
                 _icos_name2.set(files.get(url2, "ICOS"))
-                meta2 = icos_fetch_metadata(url2)
                 _icos_citation2.set(meta2["citation"])
                 _icos_station_id2.set(meta2["station_id"])
             except Exception as exc:
@@ -708,15 +732,15 @@ def server(input, output, session):
             return
         try:
             _cleanup_temp_files()
-            df = icos_download_csv(url)
+            cached = url in _icos_cache
+            df, meta = _icos_fetch(url)
             _icos_df.set(df)
             files = _icos_files.get()
             _icos_name.set(files.get(url, "ICOS"))
-            # Fetch metadata (citation + station id) via content negotiation
-            meta = icos_fetch_metadata(url)
             _icos_citation.set(meta["citation"])
             _icos_station_id.set(meta["station_id"])
-            ui.notification_show(f"Loaded {len(df)} rows from ICOS.", type="message")
+            src = "cache" if cached else "ICOS"
+            ui.notification_show(f"Loaded {len(df)} rows from {src}.", type="message")
         except Exception as exc:
             ui.notification_show(f"Download failed: {exc}", type="error")
 
@@ -727,14 +751,15 @@ def server(input, output, session):
         if not url:
             return
         try:
-            df = icos_download_csv(url)
+            cached = url in _icos_cache
+            df, meta = _icos_fetch(url)
             _icos_df2.set(df)
             files = _icos_files.get()
             _icos_name2.set(files.get(url, "ICOS"))
-            meta = icos_fetch_metadata(url)
             _icos_citation2.set(meta["citation"])
             _icos_station_id2.set(meta["station_id"])
-            ui.notification_show(f"Loaded {len(df)} rows from ICOS (file 2).", type="message")
+            src = "cache" if cached else "ICOS"
+            ui.notification_show(f"Loaded {len(df)} rows from {src} (file 2).", type="message")
         except Exception as exc:
             ui.notification_show(f"Download file 2 failed: {exc}", type="error")
 
@@ -874,7 +899,7 @@ def server(input, output, session):
         if new_cols != current_cols:
             _col_selections.set(new_cols)
 
-        # Clear pending config after applying column selections
+        # Clear pending config (and chart guard) after applying column selections
         if pending:
             _pending_config.set(None)
 
@@ -927,9 +952,10 @@ def server(input, output, session):
                 choices = {"line": "Line", "bar": "Bar"}
             else:
                 choices = {"line": "Line"}
-            # Don't specify selected — let Shiny preserve the current browser value
-            # if it's valid, or fall back to "line" automatically. This prevents
-            # round-trip timing from overwriting a config-applied "bar" selection.
+            # Omit selected — Shiny preserves the current browser value if valid.
+            # _apply_config() already pre-expanded choices and set selected="bar" when
+            # agg="monthly", so by the time this fires the browser already holds the
+            # correct value.
             ui.update_select(f"chart_{slot}", choices=choices)
 
     @reactive.calc
