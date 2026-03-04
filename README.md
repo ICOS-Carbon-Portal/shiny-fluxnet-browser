@@ -19,9 +19,11 @@ A **Shiny for Python** web application for interactive time series analysis of [
 - **X-axis control** – Auto-scale or manually set min/max datetime range.
 - **Interactive plots** – Powered by [Plotly](https://plotly.com/python/) with pan, zoom, hover and export.
 
-## Screenshot
+## Screenshots
 
 ![ICOS Ecosystem FLUXNET data browser](Screenshot_1.png)
+
+![ICOS Ecosystem FLUXNET data browser](Screenshot_2.png)
 
 ## Quick Start
 

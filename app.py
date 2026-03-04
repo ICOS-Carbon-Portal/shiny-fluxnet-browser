@@ -552,7 +552,9 @@ def server(input, output, session):
         return f"Rows: {len(df):,} | Range: {min_ts} -> {max_ts}"
 
     def aggregate_series(frame: pd.DataFrame, dt_col: str, value_col: str, agg: str) -> pd.DataFrame:
-        series = frame[[dt_col, value_col]].dropna()
+        series = frame[[dt_col, value_col]].copy()
+        # Drop rows where datetime is missing, but keep NaN values so gaps show in plots
+        series = series.dropna(subset=[dt_col])
         if series.empty:
             return series
 
@@ -673,11 +675,15 @@ def server(input, output, session):
                 ax = 1
             ax = max(1, min(4, ax))
 
+            # QC filtering
+            qc_col = f"{col}_QC"
+            sdf = df[~df[qc_col].isin([2, 3])] if qc_col in df.columns else df
+
             if is_profile:
-                _, y_vals, _ = profile_series(df, dt_col, col, view_mode)
+                _, y_vals, _ = profile_series(sdf, dt_col, col, view_mode)
                 vals = y_vals.dropna()
             else:
-                agg_data = aggregate_series(df, dt_col, col, agg)
+                agg_data = aggregate_series(sdf, dt_col, col, agg)
                 if agg_data.empty:
                     continue
                 vals = agg_data[col].dropna()
@@ -758,7 +764,16 @@ def server(input, output, session):
                 axis_num = 1
             axis_num = max(1, min(4, axis_num))
 
-            data = aggregate_series(df, dt_col, value_col, agg)
+            # QC filtering: if a companion column <value_col>_QC exists,
+            # set values to NaN where the QC value is 2 or 3 (creates gaps in line plots).
+            qc_col = f"{value_col}_QC"
+            if qc_col in df.columns:
+                series_df = df.copy()
+                series_df.loc[series_df[qc_col].isin([2, 3]), value_col] = float("nan")
+            else:
+                series_df = df
+
+            data = aggregate_series(series_df, dt_col, value_col, agg)
             if data.empty:
                 continue
 
@@ -767,7 +782,7 @@ def server(input, output, session):
 
             if is_profile:
                 # ---- Profile view ----
-                x_vals, y_vals, x_label = profile_series(df, dt_col, value_col, view_mode)
+                x_vals, y_vals, x_label = profile_series(series_df, dt_col, value_col, view_mode)
                 if y_vals.empty:
                     continue
                 name = f"{value_col} (profile)"
@@ -812,6 +827,7 @@ def server(input, output, session):
                     name=name,
                     yaxis=yref,
                     line={"color": color, "dash": dash, "width": 2},
+                    connectgaps=False,
                 )
 
             axis_labels[axis_num].add(value_col)
