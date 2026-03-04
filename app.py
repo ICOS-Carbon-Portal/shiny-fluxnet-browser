@@ -297,6 +297,7 @@ Shiny.addCustomMessageHandler('cfg_delete', function(msg) {
 """
 
 app_ui = ui.page_fluid(
+    ui.tags.script(src="consent.js", defer=True),
     ui.tags.script(_CONFIG_JS),
     ui.div(
         ui.tags.img(src="icos_logo.png", height="40px", style="vertical-align: middle; margin-right: 10px;"),
