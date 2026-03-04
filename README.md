@@ -19,6 +19,7 @@ A **Shiny for Python** web application for interactive time series analysis of [
 - **X-axis control** – Auto-scale or manually set min/max datetime range.
 - **Interactive plots** – Powered by [Plotly](https://plotly.com/python/) with pan, zoom, hover and export.
 - **Named configurations** – Save the current plot settings (series, colours, axes, view mode, etc.) under a custom name directly in the browser. Reload or delete any saved config at any time — no server or file system access required.
+- **Server-side file cache** – The 20 most recently downloaded ICOS files are cached in memory on the server (keyed by PID handle). Reloading a previously opened file or restoring a saved config is near-instant on a cache hit.
 
 ## Screenshots
 
