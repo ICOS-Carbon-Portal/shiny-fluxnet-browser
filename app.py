@@ -6,6 +6,7 @@ import os
 import re
 import zipfile
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
@@ -62,6 +63,9 @@ CHART_CHOICES = {
     "line": "Line",
     "bar": "Bar (monthly only)",
 }
+# Subsets used when expanding/restricting choices at runtime
+_CHART_MONTHLY = {"line": "Line", "bar": "Bar"}
+_CHART_LINE_ONLY = {"line": "Line"}
 
 VIEW_MODES = {
     "timeseries": "Time series",
@@ -181,12 +185,18 @@ def icos_download_csv(dobj_url: str) -> pd.DataFrame:
 
 
 def _icos_fetch(dobj_url: str) -> tuple[pd.DataFrame, dict]:
-    """Return (DataFrame, metadata) for an ICOS data object, using an LRU cache."""
+    """Return (DataFrame, metadata) for an ICOS data object, using an LRU cache.
+
+    On a cache miss the data download and metadata fetch run in parallel.
+    """
     if dobj_url in _icos_cache:
         _icos_cache.move_to_end(dobj_url)
         return _icos_cache[dobj_url]
-    df = icos_download_csv(dobj_url)
-    meta = icos_fetch_metadata(dobj_url)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        df_future = pool.submit(icos_download_csv, dobj_url)
+        meta_future = pool.submit(icos_fetch_metadata, dobj_url)
+        df = df_future.result()
+        meta = meta_future.result()
     _icos_cache[dobj_url] = (df, meta)
     if len(_icos_cache) > _ICOS_CACHE_MAX:
         _icos_cache.popitem(last=False)  # evict least-recently-used
@@ -575,9 +585,9 @@ def server(input, output, session):
                 # browser can accept the selection immediately — avoids the round-trip race
                 # where "bar" arrives before the choices are expanded.
                 if cfg.get(f"agg_{slot}") == "monthly":
-                    chart_choices = {"line": "Line", "bar": "Bar"}
+                    chart_choices = _CHART_MONTHLY
                 else:
-                    chart_choices = {"line": "Line"}
+                    chart_choices = _CHART_LINE_ONLY
                 ui.update_select(f"chart_{slot}", choices=chart_choices, selected=cfg[f"chart_{slot}"])
             if f"dash_{slot}" in cfg:
                 ui.update_select(f"dash_{slot}", selected=cfg[f"dash_{slot}"])
@@ -929,7 +939,7 @@ def server(input, output, session):
                     choices={"raw": "(not applicable)"},
                     selected="raw",
                 )
-                ui.update_select(f"chart_{slot}", choices={"line": "Line", "bar": "Bar"}, selected="line")
+                ui.update_select(f"chart_{slot}", choices=_CHART_MONTHLY, selected="line")
             else:
                 with reactive.isolate():
                     agg = input[f"agg_{slot}"]()
@@ -938,7 +948,7 @@ def server(input, output, session):
                     choices=AGG_CHOICES,
                     selected=agg if agg in AGG_CHOICES else "raw",
                 )
-                ui.update_select(f"chart_{slot}", choices={"line": "Line"}, selected="line")
+                ui.update_select(f"chart_{slot}", choices=_CHART_LINE_ONLY, selected="line")
 
     @reactive.effect
     def _update_chart_for_monthly() -> None:
@@ -949,9 +959,9 @@ def server(input, output, session):
         for slot in range(1, MAX_SERIES + 1):
             agg = input[f"agg_{slot}"]()
             if agg == "monthly":
-                choices = {"line": "Line", "bar": "Bar"}
+                choices = _CHART_MONTHLY
             else:
-                choices = {"line": "Line"}
+                choices = _CHART_LINE_ONLY
             # Omit selected — Shiny preserves the current browser value if valid.
             # _apply_config() already pre-expanded choices and set selected="bar" when
             # agg="monthly", so by the time this fires the browser already holds the
