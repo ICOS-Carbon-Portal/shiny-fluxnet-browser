@@ -10,8 +10,11 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
+import tempfile
+
 import pandas as pd
 import plotly.graph_objects as go
+import polars as pl
 import requests
 from shiny import App, reactive, render, ui
 from shinywidgets import output_widget, render_widget
@@ -20,9 +23,11 @@ MAX_SERIES = 6
 DEFAULT_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#e377c2"]
 
 _ICOS_CACHE_MAX = 20
-# LRU cache keyed by dobj_url; value is (DataFrame, metadata_dict).
+# Directory for Parquet files written on first download; keyed files survive restarts.
+_PARQUET_DIR = Path(tempfile.gettempdir()) / "icos_plot_cache"
+# LRU cache keyed by dobj_url; value is (parquet_path, metadata_dict).
 # Shared across all browser sessions for the lifetime of the server process.
-_icos_cache: OrderedDict[str, tuple[pd.DataFrame, dict]] = OrderedDict()
+_icos_cache: OrderedDict[str, tuple[Path, dict]] = OrderedDict()
 
 COLOR_PALETTE = {
     "#1f77b4": "Blue",
@@ -184,10 +189,12 @@ def icos_download_csv(dobj_url: str) -> pd.DataFrame:
     return _read_csv_flexible(raw)
 
 
-def _icos_fetch(dobj_url: str) -> tuple[pd.DataFrame, dict]:
-    """Return (DataFrame, metadata) for an ICOS data object, using an LRU cache.
+def _icos_fetch(dobj_url: str) -> tuple[Path, dict]:
+    """Return (parquet_path, metadata) for an ICOS data object, using an LRU cache.
 
     On a cache miss the data download and metadata fetch run in parallel.
+    The CSV is pre-parsed (datetime column converted to datetime64) and written
+    to a Parquet file in _PARQUET_DIR keyed by the object's hash ID.
     """
     if dobj_url in _icos_cache:
         _icos_cache.move_to_end(dobj_url)
@@ -197,10 +204,22 @@ def _icos_fetch(dobj_url: str) -> tuple[pd.DataFrame, dict]:
         meta_future = pool.submit(icos_fetch_metadata, dobj_url)
         df = df_future.result()
         meta = meta_future.result()
-    _icos_cache[dobj_url] = (df, meta)
+    # Pre-parse datetime so the Parquet file stores a proper datetime64 column,
+    # enabling efficient Polars time-range filtering later.
+    dt_col = guess_datetime_col(df)
+    if dt_col:
+        df[dt_col] = smart_parse_datetime(df[dt_col])
+        df = df.dropna(subset=[dt_col]).sort_values(dt_col).reset_index(drop=True)
+    meta["nrows"] = len(df)
+    _PARQUET_DIR.mkdir(parents=True, exist_ok=True)
+    hash_id = dobj_url.rstrip("/").rsplit("/", 1)[-1]
+    parquet_path = _PARQUET_DIR / f"{hash_id}.parquet"
+    pl.from_pandas(df).write_parquet(parquet_path)
+    _icos_cache[dobj_url] = (parquet_path, meta)
     if len(_icos_cache) > _ICOS_CACHE_MAX:
-        _icos_cache.popitem(last=False)  # evict least-recently-used
-    return df, meta
+        _, evicted = _icos_cache.popitem(last=False)
+        evicted[0].unlink(missing_ok=True)
+    return parquet_path, meta
 
 
 def _looks_like_datetime(val) -> bool:
@@ -238,6 +257,14 @@ def guess_datetime_col(df: pd.DataFrame) -> str:
             return c
     # Fallback: first column
     return cols[0]
+
+
+def _parquet_dt_col(parquet_path: Path) -> Optional[str]:
+    """Return the first datetime-typed column name in a Parquet schema."""
+    for col_name, dtype in pl.scan_parquet(parquet_path).collect_schema().items():
+        if isinstance(dtype, pl.Datetime):
+            return col_name
+    return None
 
 
 def smart_parse_datetime(series: pd.Series) -> pd.Series:
@@ -395,6 +422,60 @@ Shiny.addCustomMessageHandler('cfg_delete', function(msg) {
         }
     });
 })();
+
+// --- Fullscreen toggle ---
+(function() {
+    let _savedMarginB = null;
+
+    function _getPlotDiv() {
+        return document.querySelector('#ts_plot .js-plotly-plot');
+    }
+
+    function _doResize(toFullscreen) {
+        const plotDiv = _getPlotDiv();
+        if (!plotDiv || !window.Plotly) return;
+        if (toFullscreen) {
+            // Save current margin before going fullscreen
+            if (plotDiv._fullLayout) {
+                _savedMarginB = plotDiv._fullLayout.margin.b;
+            }
+            // Compute margin so y=-0.24 annotation stays visible at any figure height.
+            // Need: b >= 0.24*(h - topMargin - b) => b >= 0.24*(h-60)/(1+0.24)
+            const h = plotDiv.clientHeight || window.innerHeight;
+            const newB = Math.max(120, Math.round(0.24 * (h - 60) / 1.24) + 60);
+            Plotly.relayout(plotDiv, {autosize: true, 'margin.b': newB});
+        } else {
+            // Restore original margin
+            const update = (_savedMarginB !== null)
+                ? {autosize: true, 'margin.b': _savedMarginB}
+                : {autosize: true};
+            Plotly.relayout(plotDiv, update);
+        }
+    }
+
+    function _exitFullscreen() {
+        const wrap = document.getElementById('ts_plot_wrap');
+        if (!wrap || !wrap.classList.contains('plot-fullscreen')) return;
+        wrap.classList.remove('plot-fullscreen');
+        const btn = document.getElementById('fullscreen_btn');
+        if (btn) btn.textContent = '\u26f6';
+        setTimeout(function() { _doResize(false); }, 60);
+    }
+
+    document.addEventListener('click', function(e) {
+        if (!e.target.closest('#fullscreen_btn')) return;
+        const wrap = document.getElementById('ts_plot_wrap');
+        const btn  = document.getElementById('fullscreen_btn');
+        if (!wrap) return;
+        const isFs = wrap.classList.toggle('plot-fullscreen');
+        btn.textContent = isFs ? '\u00d7' : '\u26f6';
+        setTimeout(function() { _doResize(isFs); }, 60);
+    });
+
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape') _exitFullscreen();
+    });
+})();
 """
 
 app_ui = ui.page_fluid(
@@ -444,6 +525,23 @@ app_ui = ui.page_fluid(
         " .sidebar hr { margin: 2px 0 !important; }"
         " #file2_series_row { display: none; }"
         " #ts_plot_wrap { position:relative; }"
+        " #fullscreen_btn {"
+        "   position:absolute; top:6px; right:6px; z-index:20;"
+        "   background:rgba(255,255,255,0.85); border:1px solid #bbb;"
+        "   border-radius:4px; cursor:pointer; padding:1px 6px;"
+        "   font-size:16px; line-height:1.4; color:#333; }"
+        " #fullscreen_btn:hover { background:#fff; border-color:#888; }"
+        " #ts_plot_wrap.plot-fullscreen {"
+        "   position:fixed !important; top:0 !important; left:0 !important;"
+        "   width:100vw !important; height:100vh !important;"
+        "   z-index:9999 !important; background:#fff !important;"
+        "   margin:0 !important; padding:8px !important; box-sizing:border-box; }"
+        " #ts_plot_wrap.plot-fullscreen #ts_plot {"
+        "   height:calc(100vh - 16px) !important; min-height:calc(100vh - 16px) !important; }"
+        " #ts_plot_wrap.plot-fullscreen #ts_plot > div,"
+        " #ts_plot_wrap.plot-fullscreen #ts_plot .plotly,"
+        " #ts_plot_wrap.plot-fullscreen #ts_plot .html-widget {"
+        "   height:calc(100vh - 16px) !important; min-height:calc(100vh - 16px) !important; }"
         " #ts_plot_overlay {"
         "   display:none; position:absolute; inset:0;"
         "   background:rgba(255,255,255,0.65); z-index:10;"
@@ -534,6 +632,7 @@ app_ui = ui.page_fluid(
                 ui.column(2, ui.download_button("download_pdf", "Export PDF", class_="btn-sm btn-outline-secondary")),
             ),
             ui.div(
+                ui.tags.button("⛶", id="fullscreen_btn", title="Toggle fullscreen"),
                 output_widget("ts_plot", height="50vh"),
                 ui.div("Computing…", id="ts_plot_overlay"),
                 id="ts_plot_wrap",
@@ -578,7 +677,7 @@ def server(input, output, session):
 
     # --- ICOS state ---
     _icos_files: reactive.Value[dict[str, str]] = reactive.value({})
-    _icos_df: reactive.Value[Optional[pd.DataFrame]] = reactive.value(None)
+    _icos_df: reactive.Value[Optional[Path]] = reactive.value(None)
     _icos_name: reactive.Value[str] = reactive.value("")
     # Track temp file paths so we can delete previous downloads/uploads
     _prev_temp_paths: reactive.Value[list[str]] = reactive.value([])
@@ -588,7 +687,7 @@ def server(input, output, session):
     _icos_citation: reactive.Value[str] = reactive.value("")
     _icos_station_id: reactive.Value[str] = reactive.value("")
     # --- Second ICOS file state ---
-    _icos_df2: reactive.Value[Optional[pd.DataFrame]] = reactive.value(None)
+    _icos_df2: reactive.Value[Optional[Path]] = reactive.value(None)
     _icos_name2: reactive.Value[str] = reactive.value("")
     _icos_citation2: reactive.Value[str] = reactive.value("")
     _icos_station_id2: reactive.Value[str] = reactive.value("")
@@ -744,8 +843,8 @@ def server(input, output, session):
         if url1:
             try:
                 _cleanup_temp_files()
-                df, meta = _icos_fetch(url1)
-                _icos_df.set(df)
+                path, meta = _icos_fetch(url1)
+                _icos_df.set(path)
                 files = _icos_files.get()
                 _icos_name.set(files.get(url1, "ICOS"))
                 _icos_citation.set(meta["citation"])
@@ -756,8 +855,8 @@ def server(input, output, session):
         url2 = cfg.get("icos_file2", "")
         if url2:
             try:
-                df2, meta2 = _icos_fetch(url2)
-                _icos_df2.set(df2)
+                path2, meta2 = _icos_fetch(url2)
+                _icos_df2.set(path2)
                 files = _icos_files.get()
                 _icos_name2.set(files.get(url2, "ICOS"))
                 _icos_citation2.set(meta2["citation"])
@@ -815,14 +914,14 @@ def server(input, output, session):
         try:
             _cleanup_temp_files()
             cached = url in _icos_cache
-            df, meta = _icos_fetch(url)
-            _icos_df.set(df)
+            path, meta = _icos_fetch(url)
+            _icos_df.set(path)
             files = _icos_files.get()
             _icos_name.set(files.get(url, "ICOS"))
             _icos_citation.set(meta["citation"])
             _icos_station_id.set(meta["station_id"])
             src = "cache" if cached else "ICOS"
-            ui.notification_show(f"Loaded {len(df)} rows from {src}.", type="message")
+            ui.notification_show(f"Loaded {meta['nrows']} rows from {src}.", type="message")
         except Exception as exc:
             ui.notification_show(f"Download failed: {exc}", type="error")
 
@@ -834,23 +933,23 @@ def server(input, output, session):
             return
         try:
             cached = url in _icos_cache
-            df, meta = _icos_fetch(url)
-            _icos_df2.set(df)
+            path, meta = _icos_fetch(url)
+            _icos_df2.set(path)
             files = _icos_files.get()
             _icos_name2.set(files.get(url, "ICOS"))
             _icos_citation2.set(meta["citation"])
             _icos_station_id2.set(meta["station_id"])
             src = "cache" if cached else "ICOS"
-            ui.notification_show(f"Loaded {len(df)} rows from {src} (file 2).", type="message")
+            ui.notification_show(f"Loaded {meta['nrows']} rows from {src} (file 2).", type="message")
         except Exception as exc:
             ui.notification_show(f"Download file 2 failed: {exc}", type="error")
 
     @reactive.calc
     def raw_df2() -> Optional[pd.DataFrame]:
-        """Return the second ICOS file dataframe."""
-        icos2 = _icos_df2.get()
-        if icos2 is not None and not icos2.empty:
-            return icos2
+        """Return the second ICOS file as a pandas DataFrame (read from Parquet)."""
+        icos2_path = _icos_df2.get()
+        if icos2_path is not None and icos2_path.exists():
+            return pl.read_parquet(icos2_path).to_pandas()
         return None
 
     @reactive.calc
@@ -885,9 +984,9 @@ def server(input, output, session):
     @reactive.calc
     def raw_df() -> Optional[pd.DataFrame]:
         # ICOS data takes priority if loaded
-        icos = _icos_df.get()
-        if icos is not None and not icos.empty:
-            return icos
+        icos_path = _icos_df.get()
+        if icos_path is not None and icos_path.exists():
+            return pl.read_parquet(icos_path).to_pandas()
 
         file_info = input.data_file()
         if not file_info:
@@ -913,6 +1012,19 @@ def server(input, output, session):
             df = pd.read_excel(file_path)
         else:
             return None
+
+        if df is None:
+            return None
+
+        # Write Parquet for ts_plot() lazy scan (side-effect: deterministic path, written once)
+        parquet_path = _PARQUET_DIR / f"upload_{file_path.name}.parquet"
+        if not parquet_path.exists():
+            _PARQUET_DIR.mkdir(parents=True, exist_ok=True)
+            dt_col_guess = guess_datetime_col(df)
+            df_write = df.copy()
+            if dt_col_guess:
+                df_write[dt_col_guess] = smart_parse_datetime(df_write[dt_col_guess])
+            pl.from_pandas(df_write).write_parquet(parquet_path)
 
         return df
 
@@ -1396,12 +1508,31 @@ def server(input, output, session):
         trace_count = 0
         bar_offset = 0  # counter for offsetgroup so grouped bars don't overlap
 
-        # Second file filtered data (for series 4-6)
+        # Second file filtered data (used by _update_yaxis_ranges and fallback path)
         df2 = filtered_df2()
-        # Guess dt col for second file
-        dt_col2 = None
-        if df2 is not None and not df2.empty:
+
+        # Parquet paths for per-series lazy column reads
+        _parquet1: Optional[Path] = _icos_df.get()
+        if _parquet1 is None:
+            _file_info_p = input.data_file()
+            if _file_info_p:
+                _candidate = _PARQUET_DIR / f"upload_{Path(_file_info_p[0]['datapath']).name}.parquet"
+                if _candidate.exists():
+                    _parquet1 = _candidate
+        _parquet2: Optional[Path] = _icos_df2.get()
+
+        schema1 = set(pl.scan_parquet(_parquet1).collect_schema().keys()) if _parquet1 and _parquet1.exists() else None
+        schema2 = set(pl.scan_parquet(_parquet2).collect_schema().keys()) if _parquet2 and _parquet2.exists() else None
+
+        # dt_col2: read from Parquet schema (no full data load); fall back to df2 guess
+        dt_col2: Optional[str] = None
+        if _parquet2 and _parquet2.exists():
+            dt_col2 = _parquet_dt_col(_parquet2)
+        elif df2 is not None and not df2.empty:
             dt_col2 = guess_datetime_col(df2)
+
+        start = parse_opt_datetime(input.start_ts())
+        end   = parse_opt_datetime(input.end_ts())
 
         for slot in range(1, MAX_SERIES + 1):
             s = params["series"][slot - 1]
@@ -1409,19 +1540,9 @@ def server(input, output, session):
             if not value_col:
                 continue
 
-            # Select appropriate dataframe and datetime column
-            if slot <= 3:
-                slot_df = df
-                slot_dt_col = dt_col
-            else:
-                slot_df = df2
-                slot_dt_col = dt_col2
-            if slot_df is None or slot_df.empty:
-                continue
-            if not slot_dt_col or slot_dt_col not in slot_df.columns:
-                continue
-            if value_col not in slot_df.columns:
-                continue
+            slot_dt_col = dt_col if slot <= 3 else dt_col2
+            parquet_path = _parquet1 if slot <= 3 else _parquet2
+            schema       = schema1   if slot <= 3 else schema2
 
             agg = s["agg"]
             chart = s["chart"]
@@ -1434,14 +1555,35 @@ def server(input, output, session):
                 axis_num = 1
             axis_num = max(1, min(4, axis_num))
 
-            # QC filtering: if a companion column <value_col>_QC exists,
-            # set values to NaN where the QC value is 2 or 3 (creates gaps in line plots).
             qc_col = f"{value_col}_QC"
-            if qc_col in slot_df.columns:
-                series_df = slot_df.copy()
-                series_df.loc[series_df[qc_col].isin([2, 3]), value_col] = float("nan")
+            if parquet_path and schema and slot_dt_col and value_col in schema and slot_dt_col in schema:
+                # Lazy scan: read only the needed columns directly from Parquet
+                select_cols = [slot_dt_col, value_col]
+                if qc_col in schema:
+                    select_cols.append(qc_col)
+                lazy = pl.scan_parquet(parquet_path).select(select_cols)
+                if start is not None:
+                    lazy = lazy.filter(pl.col(slot_dt_col) >= start)
+                if end is not None:
+                    lazy = lazy.filter(pl.col(slot_dt_col) <= end)
+                series_df = lazy.collect().to_pandas()
+                if qc_col in series_df.columns:
+                    series_df = series_df.copy()
+                    series_df.loc[series_df[qc_col].isin([2, 3]), value_col] = float("nan")
             else:
-                series_df = slot_df
+                # Fallback: use full filtered DataFrame (upload before parquet exists, or no data)
+                slot_df = df if slot <= 3 else df2
+                if slot_df is None or slot_df.empty:
+                    continue
+                if not slot_dt_col or slot_dt_col not in slot_df.columns:
+                    continue
+                if value_col not in slot_df.columns:
+                    continue
+                if qc_col in slot_df.columns:
+                    series_df = slot_df.copy()
+                    series_df.loc[series_df[qc_col].isin([2, 3]), value_col] = float("nan")
+                else:
+                    series_df = slot_df
 
             data = aggregate_series(series_df, slot_dt_col, value_col, agg)
             if data.empty:
@@ -1680,7 +1822,7 @@ def server(input, output, session):
             wrapped = "<br>".join(_wrap_line(line) for line in citation_lines)
             fig.add_annotation(
                 x=0,
-                y=-0.28,
+                y=-0.24,
                 xref="paper",
                 yref="paper",
                 text=wrapped,
@@ -1692,7 +1834,7 @@ def server(input, output, session):
             )
             # Count total <br> breaks to size the bottom margin
             n_breaks = wrapped.count("<br>") + 1
-            fig.update_layout(margin={"b": 120 + 14 * n_breaks})
+            fig.update_layout(margin={"b": 130 + 18 * n_breaks})
 
         if trace_count == 0:
             fig.add_annotation(
