@@ -323,6 +323,78 @@ Shiny.addCustomMessageHandler('cfg_delete', function(msg) {
     localStorage.removeItem(_CFG_PREFIX + msg.name);
     _sendCfgList();
 });
+
+// --- Plotly relayout → Shiny axis sync ---
+(function() {
+    let _relayoutBound = false;
+    let _debounceTimer = null;
+    // Map Plotly axis keys to our input names
+    const _AXIS_MAP = {
+        'xaxis': 'x',
+        'yaxis': 'y1', 'yaxis2': 'y2', 'yaxis3': 'y3', 'yaxis4': 'y4'
+    };
+
+    function _findPlotlyDiv() {
+        const wrap = document.getElementById('ts_plot');
+        if (!wrap) return null;
+        // shinywidgets renders Plotly in a div with class 'plotly-graph-div' or 'js-plotly-plot'
+        let el = wrap.querySelector('.js-plotly-plot');
+        if (el) return el;
+        // Also try inside an iframe
+        const iframe = wrap.querySelector('iframe');
+        if (iframe && iframe.contentDocument) {
+            return iframe.contentDocument.querySelector('.js-plotly-plot');
+        }
+        return null;
+    }
+
+    function _attachRelayout() {
+        if (_relayoutBound) return;
+        const plotDiv = _findPlotlyDiv();
+        if (!plotDiv || !plotDiv.on) return;
+        _relayoutBound = true;
+        plotDiv.on('plotly_relayout', function(eventData) {
+            if (!eventData) return;
+            // Debounce to avoid flooding during drag
+            clearTimeout(_debounceTimer);
+            _debounceTimer = setTimeout(function() {
+                const ranges = {};
+                for (const [plotlyKey, ourKey] of Object.entries(_AXIS_MAP)) {
+                    const r0 = eventData[plotlyKey + '.range[0]'];
+                    const r1 = eventData[plotlyKey + '.range[1]'];
+                    if (r0 !== undefined && r1 !== undefined) {
+                        ranges[ourKey] = [r0, r1];
+                    }
+                    // Also handle the array form
+                    const rArr = eventData[plotlyKey + '.range'];
+                    if (rArr && Array.isArray(rArr) && rArr.length === 2) {
+                        ranges[ourKey] = rArr;
+                    }
+                    // Handle autorange reset
+                    const ar = eventData[plotlyKey + '.autorange'];
+                    if (ar === true) {
+                        ranges[ourKey] = 'auto';
+                    }
+                }
+                if (Object.keys(ranges).length > 0) {
+                    Shiny.setInputValue('_plotly_relayout', {ranges: ranges, ts: Date.now()});
+                }
+            }, 150);
+        });
+    }
+
+    // Observe DOM for the plotly div to appear, then attach
+    const _obs = new MutationObserver(function() {
+        if (!_relayoutBound) _attachRelayout();
+    });
+    $(document).on('shiny:connected', function() {
+        const wrap = document.getElementById('ts_plot');
+        if (wrap) {
+            _obs.observe(wrap, {childList: true, subtree: true});
+            _attachRelayout();
+        }
+    });
+})();
 """
 
 app_ui = ui.page_fluid(
@@ -1257,6 +1329,39 @@ def server(input, output, session):
         # Clear the config override after first use
         if yaxis_cfg:
             _yaxis_from_config.set(None)
+
+    @reactive.effect
+    @reactive.event(input._plotly_relayout)
+    def _handle_plotly_relayout():
+        """Sync Plotly interactive pan/zoom ranges back to axis input fields."""
+        msg = input._plotly_relayout()
+        if not isinstance(msg, dict):
+            return
+        ranges = msg.get("ranges", {})
+        if not ranges:
+            return
+
+        for key, val in ranges.items():
+            if key == "x":
+                if val == "auto":
+                    ui.update_checkbox("x_auto", value=True)
+                elif isinstance(val, list) and len(val) == 2:
+                    ui.update_checkbox("x_auto", value=False)
+                    # Plotly returns ISO datetime strings for time axes
+                    ui.update_text("x_min", value=str(val[0])[:16])
+                    ui.update_text("x_max", value=str(val[1])[:16])
+            elif key.startswith("y"):
+                # key is y1, y2, y3, y4
+                ax_num = key[1:]
+                if val == "auto":
+                    ui.update_checkbox(f"y{ax_num}_auto", value=True)
+                elif isinstance(val, list) and len(val) == 2:
+                    ui.update_checkbox(f"y{ax_num}_auto", value=False)
+                    try:
+                        ui.update_text(f"y{ax_num}_min", value=f"{float(val[0]):.4g}")
+                        ui.update_text(f"y{ax_num}_max", value=f"{float(val[1]):.4g}")
+                    except (ValueError, TypeError):
+                        pass
 
     @output
     @render_widget
