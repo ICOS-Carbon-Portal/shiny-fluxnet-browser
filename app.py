@@ -1895,7 +1895,7 @@ def server(input, output, session):
                 if use_std and std_col in data.columns:
                     error_y = dict(
                         type="data",
-                        array=data[std_col].tolist(),
+                        array=[None if pd.isna(v) else v for v in data[std_col]],
                         visible=True,
                         color=color,
                         thickness=1,
