@@ -255,7 +255,49 @@ _COLOR_OPTION_CSS = "\n".join(
 )
 
 
+_CONFIG_JS = """
+// --- localStorage config helpers ---
+const _CFG_PREFIX = 'shiny_fluxnet_cfg_';
+
+function _cfgNames() {
+    const names = [];
+    for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k.startsWith(_CFG_PREFIX)) names.push(k.slice(_CFG_PREFIX.length));
+    }
+    return names.sort();
+}
+
+function _sendCfgList() {
+    Shiny.setInputValue('_cfg_names', {names: _cfgNames(), ts: Date.now()});
+}
+
+$(document).on('shiny:connected', function() {
+    _sendCfgList();
+});
+
+Shiny.addCustomMessageHandler('cfg_save', function(msg) {
+    localStorage.setItem(_CFG_PREFIX + msg.name, JSON.stringify(msg.data));
+    _sendCfgList();
+});
+
+Shiny.addCustomMessageHandler('cfg_load', function(msg) {
+    const raw = localStorage.getItem(_CFG_PREFIX + msg.name);
+    if (raw) {
+        Shiny.setInputValue('_cfg_data', {name: msg.name, data: JSON.parse(raw), ts: Date.now()});
+    } else {
+        Shiny.setInputValue('_cfg_data', {name: msg.name, data: null, ts: Date.now()});
+    }
+});
+
+Shiny.addCustomMessageHandler('cfg_delete', function(msg) {
+    localStorage.removeItem(_CFG_PREFIX + msg.name);
+    _sendCfgList();
+});
+"""
+
 app_ui = ui.page_fluid(
+    ui.tags.script(_CONFIG_JS),
     ui.div(
         ui.tags.img(src="icos_logo.png", height="40px", style="vertical-align: middle; margin-right: 10px;"),
         ui.tags.span("FLUXNET data browser", style="font-size: 14pt !important; font-weight: bold; vertical-align: middle;"),
@@ -433,17 +475,7 @@ def server(input, output, session):
     # Pending config: holds column/series settings to apply after data loads
     _pending_config: reactive.Value[Optional[dict]] = reactive.value(None)
 
-    # --- Config storage ---
-    _CONFIG_DIR = Path(__file__).parent / "_configs"
-    _CONFIG_DIR.mkdir(exist_ok=True)
-
-    def _list_configs() -> dict[str, str]:
-        """Return {filename: display_name} of saved configs."""
-        configs = {"": ""}
-        if _CONFIG_DIR.exists():
-            for f in sorted(_CONFIG_DIR.glob("*.json")):
-                configs[f.stem] = f.stem
-        return configs
+    # --- Config storage (browser localStorage) ---
 
     def _collect_config() -> dict:
         """Collect current UI state into a dict."""
@@ -509,41 +541,54 @@ def server(input, output, session):
             if f"yaxis_{slot}" in cfg:
                 ui.update_select(f"yaxis_{slot}", selected=cfg[f"yaxis_{slot}"])
 
-    # Populate config list on startup
+    # Populate config list from browser localStorage
     @reactive.effect
+    @reactive.event(input._cfg_names)
     def _init_config_list():
-        ui.update_select("config_list", choices=_list_configs())
+        msg = input._cfg_names()
+        names = msg.get("names", []) if isinstance(msg, dict) else []
+        choices: dict[str, str] = {"":""}
+        for n in names:
+            choices[n] = n
+        ui.update_select("config_list", choices=choices)
 
     @reactive.effect
     @reactive.event(input.config_save)
-    def _do_config_save():
+    async def _do_config_save():
         name = input.config_name().strip()
         if not name:
             ui.notification_show("Enter a config name first.", type="warning")
             return
-        # Sanitize filename
         safe_name = re.sub(r'[^\w\s\-]', '', name).strip()
         if not safe_name:
             ui.notification_show("Invalid config name.", type="warning")
             return
         cfg = _collect_config()
-        path = _CONFIG_DIR / f"{safe_name}.json"
-        path.write_text(json.dumps(cfg, indent=2))
-        ui.update_select("config_list", choices=_list_configs(), selected=safe_name)
+        await session.send_custom_message("cfg_save", {"name": safe_name, "data": cfg})
         ui.update_text("config_name", value="")
         ui.notification_show(f"Config '{safe_name}' saved.", type="message")
 
     @reactive.effect
     @reactive.event(input.config_load)
-    def _do_config_load():
+    async def _do_config_load():
         name = input.config_list()
         if not name:
             return
-        path = _CONFIG_DIR / f"{name}.json"
-        if not path.exists():
+        # Ask browser for config data from localStorage
+        await session.send_custom_message("cfg_load", {"name": name})
+
+    @reactive.effect
+    @reactive.event(input._cfg_data)
+    def _do_config_apply():
+        """Handle config data received from browser localStorage."""
+        msg = input._cfg_data()
+        if not isinstance(msg, dict):
+            return
+        name = msg.get("name", "")
+        cfg = msg.get("data")
+        if cfg is None:
             ui.notification_show(f"Config '{name}' not found.", type="error")
             return
-        cfg = json.loads(path.read_text())
         # Query ICOS files if needed
         if not _icos_files.get() and (cfg.get("icos_file") or cfg.get("icos_file2")):
             try:
@@ -591,14 +636,11 @@ def server(input, output, session):
 
     @reactive.effect
     @reactive.event(input.config_delete)
-    def _do_config_delete():
+    async def _do_config_delete():
         name = input.config_list()
         if not name:
             return
-        path = _CONFIG_DIR / f"{name}.json"
-        if path.exists():
-            path.unlink()
-        ui.update_select("config_list", choices=_list_configs())
+        await session.send_custom_message("cfg_delete", {"name": name})
         ui.notification_show(f"Config '{name}' deleted.", type="message")
 
     @reactive.effect
