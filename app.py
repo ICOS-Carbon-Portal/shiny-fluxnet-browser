@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import re
 import zipfile
@@ -326,6 +327,15 @@ app_ui = ui.page_fluid(
     ),
     ui.layout_sidebar(
         ui.sidebar(
+            ui.h5("Saved configurations"),
+            ui.input_select("config_list", "Load config", choices={"":""}),
+            ui.row(
+                ui.column(6, ui.input_action_button("config_load", "Load", class_="btn-sm")),
+                ui.column(6, ui.input_action_button("config_delete", "Delete", class_="btn-sm btn-danger")),
+            ),
+            ui.input_text("config_name", None, placeholder="Config name"),
+            ui.input_action_button("config_save", "Save current config", class_="btn-sm"),
+            ui.hr(),
             ui.h5("ICOS Carbon Portal"),
             ui.input_action_button("icos_query", "Query ICOS files", class_="btn-sm btn-outline-primary"),
             ui.output_text_verbatim("icos_status"),
@@ -420,6 +430,176 @@ def server(input, output, session):
     _icos_name2: reactive.Value[str] = reactive.value("")
     _icos_citation2: reactive.Value[str] = reactive.value("")
     _icos_station_id2: reactive.Value[str] = reactive.value("")
+    # Pending config: holds column/series settings to apply after data loads
+    _pending_config: reactive.Value[Optional[dict]] = reactive.value(None)
+
+    # --- Config storage ---
+    _CONFIG_DIR = Path(__file__).parent / "_configs"
+    _CONFIG_DIR.mkdir(exist_ok=True)
+
+    def _list_configs() -> dict[str, str]:
+        """Return {filename: display_name} of saved configs."""
+        configs = {"": ""}
+        if _CONFIG_DIR.exists():
+            for f in sorted(_CONFIG_DIR.glob("*.json")):
+                configs[f.stem] = f.stem
+        return configs
+
+    def _collect_config() -> dict:
+        """Collect current UI state into a dict."""
+        cfg: dict = {}
+        cfg["icos_file"] = input.icos_file()
+        cfg["icos_file2"] = input.icos_file2()
+        cfg["dt_col"] = input.dt_col()
+        cfg["view_mode"] = input.view_mode()
+        cfg["start_ts"] = input.start_ts()
+        cfg["end_ts"] = input.end_ts()
+        cfg["x_auto"] = input.x_auto()
+        cfg["x_min"] = input.x_min()
+        cfg["x_max"] = input.x_max()
+        for ax in range(1, 5):
+            cfg[f"y{ax}_auto"] = input[f"y{ax}_auto"]()
+            cfg[f"y{ax}_min"] = input[f"y{ax}_min"]()
+            cfg[f"y{ax}_max"] = input[f"y{ax}_max"]()
+        for slot in range(1, MAX_SERIES + 1):
+            cfg[f"col_{slot}"] = input[f"col_{slot}"]()
+            cfg[f"agg_{slot}"] = input[f"agg_{slot}"]()
+            cfg[f"chart_{slot}"] = input[f"chart_{slot}"]()
+            cfg[f"dash_{slot}"] = input[f"dash_{slot}"]()
+            cfg[f"color_{slot}"] = input[f"color_{slot}"]()
+            cfg[f"yaxis_{slot}"] = input[f"yaxis_{slot}"]()
+        return cfg
+
+    def _apply_config(cfg: dict):
+        """Restore UI state from a config dict."""
+        if cfg.get("icos_file"):
+            ui.update_select("icos_file", selected=cfg["icos_file"])
+        if cfg.get("icos_file2"):
+            ui.update_select("icos_file2", selected=cfg["icos_file2"])
+        if "view_mode" in cfg:
+            ui.update_select("view_mode", selected=cfg["view_mode"])
+        if "start_ts" in cfg:
+            ui.update_text("start_ts", value=cfg["start_ts"])
+        if "end_ts" in cfg:
+            ui.update_text("end_ts", value=cfg["end_ts"])
+        if "x_auto" in cfg:
+            ui.update_checkbox("x_auto", value=cfg["x_auto"])
+        if "x_min" in cfg:
+            ui.update_text("x_min", value=cfg["x_min"])
+        if "x_max" in cfg:
+            ui.update_text("x_max", value=cfg["x_max"])
+        for ax in range(1, 5):
+            if f"y{ax}_auto" in cfg:
+                ui.update_checkbox(f"y{ax}_auto", value=cfg[f"y{ax}_auto"])
+            if f"y{ax}_min" in cfg:
+                ui.update_text(f"y{ax}_min", value=cfg[f"y{ax}_min"])
+            if f"y{ax}_max" in cfg:
+                ui.update_text(f"y{ax}_max", value=cfg[f"y{ax}_max"])
+        for slot in range(1, MAX_SERIES + 1):
+            if f"col_{slot}" in cfg:
+                ui.update_select(f"col_{slot}", selected=cfg[f"col_{slot}"])
+            if f"agg_{slot}" in cfg:
+                ui.update_select(f"agg_{slot}", selected=cfg[f"agg_{slot}"])
+            if f"chart_{slot}" in cfg:
+                ui.update_select(f"chart_{slot}", selected=cfg[f"chart_{slot}"])
+            if f"dash_{slot}" in cfg:
+                ui.update_select(f"dash_{slot}", selected=cfg[f"dash_{slot}"])
+            if f"color_{slot}" in cfg:
+                ui.update_select(f"color_{slot}", selected=cfg[f"color_{slot}"])
+            if f"yaxis_{slot}" in cfg:
+                ui.update_select(f"yaxis_{slot}", selected=cfg[f"yaxis_{slot}"])
+
+    # Populate config list on startup
+    @reactive.effect
+    def _init_config_list():
+        ui.update_select("config_list", choices=_list_configs())
+
+    @reactive.effect
+    @reactive.event(input.config_save)
+    def _do_config_save():
+        name = input.config_name().strip()
+        if not name:
+            ui.notification_show("Enter a config name first.", type="warning")
+            return
+        # Sanitize filename
+        safe_name = re.sub(r'[^\w\s\-]', '', name).strip()
+        if not safe_name:
+            ui.notification_show("Invalid config name.", type="warning")
+            return
+        cfg = _collect_config()
+        path = _CONFIG_DIR / f"{safe_name}.json"
+        path.write_text(json.dumps(cfg, indent=2))
+        ui.update_select("config_list", choices=_list_configs(), selected=safe_name)
+        ui.update_text("config_name", value="")
+        ui.notification_show(f"Config '{safe_name}' saved.", type="message")
+
+    @reactive.effect
+    @reactive.event(input.config_load)
+    def _do_config_load():
+        name = input.config_list()
+        if not name:
+            return
+        path = _CONFIG_DIR / f"{name}.json"
+        if not path.exists():
+            ui.notification_show(f"Config '{name}' not found.", type="error")
+            return
+        cfg = json.loads(path.read_text())
+        # Query ICOS files if needed
+        if not _icos_files.get() and (cfg.get("icos_file") or cfg.get("icos_file2")):
+            try:
+                files = icos_query_files()
+                _icos_files.set(files)
+                choices = {url: nm for url, nm in files.items()}
+                ui.update_select("icos_file", choices=choices)
+                ui.update_select("icos_file2", choices={"": "", **choices})
+            except Exception as exc:
+                ui.notification_show(f"ICOS query failed: {exc}", type="error")
+                return
+        # Apply non-column settings immediately
+        _apply_config(cfg)
+        # Store config for deferred column application (must be set before data so
+        # _update_column_inputs sees it when raw_df() triggers the effect)
+        _pending_config.set(cfg)
+        # Auto-download file 1
+        url1 = cfg.get("icos_file", "")
+        if url1:
+            try:
+                _cleanup_temp_files()
+                df = icos_download_csv(url1)
+                _icos_df.set(df)
+                files = _icos_files.get()
+                _icos_name.set(files.get(url1, "ICOS"))
+                meta = icos_fetch_metadata(url1)
+                _icos_citation.set(meta["citation"])
+                _icos_station_id.set(meta["station_id"])
+            except Exception as exc:
+                ui.notification_show(f"Download file 1 failed: {exc}", type="error")
+        # Auto-download file 2
+        url2 = cfg.get("icos_file2", "")
+        if url2:
+            try:
+                df2 = icos_download_csv(url2)
+                _icos_df2.set(df2)
+                files = _icos_files.get()
+                _icos_name2.set(files.get(url2, "ICOS"))
+                meta2 = icos_fetch_metadata(url2)
+                _icos_citation2.set(meta2["citation"])
+                _icos_station_id2.set(meta2["station_id"])
+            except Exception as exc:
+                ui.notification_show(f"Download file 2 failed: {exc}", type="error")
+        ui.notification_show(f"Config '{name}' loaded.", type="message")
+
+    @reactive.effect
+    @reactive.event(input.config_delete)
+    def _do_config_delete():
+        name = input.config_list()
+        if not name:
+            return
+        path = _CONFIG_DIR / f"{name}.json"
+        if path.exists():
+            path.unlink()
+        ui.update_select("config_list", choices=_list_configs())
+        ui.notification_show(f"Config '{name}' deleted.", type="message")
 
     @reactive.effect
     @reactive.event(input.icos_query)
@@ -563,6 +743,8 @@ def server(input, output, session):
 
     @reactive.effect
     def _update_column_inputs() -> None:
+        with reactive.isolate():
+            pending = _pending_config.get()
         df = raw_df()
         if df is not None and not df.empty:
             all_cols = [str(c) for c in df.columns]
@@ -570,16 +752,24 @@ def server(input, output, session):
             if not numeric_cols:
                 numeric_cols = all_cols
 
-            best_dt = guess_datetime_col(df)
+            # Use pending config dt_col if available, else guess
+            if pending and pending.get("dt_col") and pending["dt_col"] in all_cols:
+                best_dt = pending["dt_col"]
+            else:
+                best_dt = guess_datetime_col(df)
             ui.update_select("dt_col", choices={c: c for c in all_cols}, selected=best_dt)
 
             col_choices = {"": "(none)"}
             col_choices.update({c: c for c in numeric_cols})
 
             for slot in range(1, 4):  # Series 1-3: first file
-                with reactive.isolate():
-                    current = input[f"col_{slot}"]()
-                sel = current if current and current in col_choices else ""
+                # Use pending config column if available
+                if pending and pending.get(f"col_{slot}") and pending[f"col_{slot}"] in col_choices:
+                    sel = pending[f"col_{slot}"]
+                else:
+                    with reactive.isolate():
+                        current = input[f"col_{slot}"]()
+                    sel = current if current and current in col_choices else ""
                 ui.update_select(f"col_{slot}", choices=col_choices, selected=sel)
 
         # Series 4-6: second file
@@ -591,14 +781,21 @@ def server(input, output, session):
             col_choices2 = {"": "(none)"}
             col_choices2.update({c: c for c in numeric_cols2})
             for slot in range(4, MAX_SERIES + 1):
-                with reactive.isolate():
-                    current = input[f"col_{slot}"]()
-                sel = current if current and current in col_choices2 else ""
+                if pending and pending.get(f"col_{slot}") and pending[f"col_{slot}"] in col_choices2:
+                    sel = pending[f"col_{slot}"]
+                else:
+                    with reactive.isolate():
+                        current = input[f"col_{slot}"]()
+                    sel = current if current and current in col_choices2 else ""
                 ui.update_select(f"col_{slot}", choices=col_choices2, selected=sel)
         else:
             # Clear series 4-6 choices when no second file
             for slot in range(4, MAX_SERIES + 1):
                 ui.update_select(f"col_{slot}", choices={"": "(none)"}, selected="")
+
+        # Clear pending config after applying column selections
+        if pending:
+            _pending_config.set(None)
 
     @reactive.effect
     @reactive.event(input.view_mode)
