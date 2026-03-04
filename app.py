@@ -300,20 +300,55 @@ def smart_parse_datetime(series: pd.Series) -> pd.Series:
     return pd.to_datetime(series, errors="coerce")
 
 
-def series_controls(slot: int) -> ui.Tag:
-    return ui.card(
-        ui.card_header(ui.output_text(f"header_{slot}", inline=True)),
-        ui.input_select(f"col_{slot}", "Column", choices={"": "(none)"}, selected=""),
-        ui.input_select(f"agg_{slot}", "Averaging", choices=AGG_CHOICES, selected="raw"),
-        ui.input_select(f"chart_{slot}", "Chart type", choices=CHART_CHOICES, selected="line"),
-        ui.input_select(f"dash_{slot}", "Line type", choices=LINE_CHOICES, selected="solid"),
-        ui.input_select(f"color_{slot}", "Color", choices=COLOR_PALETTE, selected=DEFAULT_COLORS[slot - 1]),
-        ui.input_select(
-            f"yaxis_{slot}",
-            "Y-axis",
-            choices={"1": "Axis 1", "2": "Axis 2", "3": "Axis 3", "4": "Axis 4"},
-            selected="1",
+def _series_row(slot: int) -> ui.Tag:
+    """One horizontal row in the series table."""
+    is_first  = slot == 1
+    is_last   = slot == MAX_SERIES
+    file2_cls = " sr-file2" if slot >= 4 else ""
+    return ui.div(
+        ui.div(
+            ui.input_action_button(f"move_up_{slot}",   "▲", class_="sr-btn", disabled=is_first),
+            ui.input_action_button(f"move_down_{slot}", "▼", class_="sr-btn", disabled=is_last),
+            class_="sr-move",
         ),
+        ui.output_ui(f"slot_num_{slot}"),
+        ui.div(ui.input_select(f"col_{slot}",   None, choices={"": "(none)"}, selected=""),       class_="sr-col"),
+        ui.div(ui.input_select(f"agg_{slot}",   None, choices=AGG_CHOICES, selected="raw"),        class_="sr-col"),
+        ui.div(ui.input_select(f"chart_{slot}", None, choices=CHART_CHOICES, selected="line"),     class_="sr-col"),
+        ui.div(ui.input_select(f"dash_{slot}",  None, choices=LINE_CHOICES, selected="solid"),     class_="sr-col"),
+        ui.div(ui.input_select(f"color_{slot}", None, choices=COLOR_PALETTE,
+                               selected=DEFAULT_COLORS[slot - 1]),                                 class_="sr-col"),
+        ui.div(ui.input_select(f"yaxis_{slot}", None,
+                               choices={"1": "Y1", "2": "Y2", "3": "Y3", "4": "Y4"},
+                               selected="1"),                                                      class_="sr-col"),
+        class_=f"sr-row{file2_cls}",
+        id=f"series_row_{slot}",
+    )
+
+
+def series_table() -> ui.Tag:
+    """Single card containing all 6 series as horizontal rows."""
+    header = ui.div(
+        ui.div("",          class_="sr-move"),
+        ui.div("",          class_="sr-num"),
+        ui.div("Column",    class_="sr-col sr-hdr"),
+        ui.div("Averaging", class_="sr-col sr-hdr"),
+        ui.div("Chart",     class_="sr-col sr-hdr"),
+        ui.div("Line",      class_="sr-col sr-hdr"),
+        ui.div("Color",     class_="sr-col sr-hdr"),
+        ui.div("Y-axis",    class_="sr-col sr-hdr"),
+        class_="sr-row sr-header",
+    )
+    return ui.card(
+        ui.card_header(
+            ui.div(
+                ui.tags.span("Series"),
+                ui.input_action_button("plot_pause", "⏸ Pause", class_="btn-sm sr-pause-btn"),
+                class_="sr-card-hdr-row",
+            ),
+        ),
+        ui.div(header, *[_series_row(i) for i in range(1, MAX_SERIES + 1)],
+               class_="series-table"),
     )
 
 
@@ -491,6 +526,39 @@ Shiny.addCustomMessageHandler('cfg_delete', function(msg) {
         if (e.key === 'Escape') _exitFullscreen();
     });
 })();
+
+Shiny.addCustomMessageHandler('set_pause_state', function(paused) {
+    const btn = document.getElementById('plot_pause');
+    if (btn) btn.classList.toggle('sr-pause-active', paused);
+});
+
+(function() {
+    var dragging = false, startY, startH;
+    document.addEventListener('DOMContentLoaded', function() {
+        var handle = document.getElementById('plot-resize-handle');
+        if (!handle) return;
+        handle.addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            dragging = true;
+            startY = e.clientY;
+            startH = parseInt(getComputedStyle(document.documentElement)
+                              .getPropertyValue('--plot-h')) || 450;
+            document.body.style.userSelect = 'none';
+            document.body.style.cursor = 'ns-resize';
+        });
+        document.addEventListener('mousemove', function(e) {
+            if (!dragging) return;
+            var newH = Math.max(150, startH + (e.clientY - startY));
+            document.documentElement.style.setProperty('--plot-h', newH + 'px');
+        });
+        document.addEventListener('mouseup', function() {
+            if (!dragging) return;
+            dragging = false;
+            document.body.style.userSelect = '';
+            document.body.style.cursor = '';
+        });
+    });
+})();
 """
 
 app_ui = ui.page_fluid(
@@ -538,7 +606,57 @@ app_ui = ui.page_fluid(
         " .yax-group .row { margin-top: -2px !important; }"
         " .sidebar h5 { margin-bottom: 0 !important; margin-top: 2px !important; font-size: 10pt !important; font-weight: bold !important; }"
         " .sidebar hr { margin: 2px 0 !important; }"
-        " #file2_series_row { display: none; }"
+        " .sr-file2 { display: none; }"
+        " .series-table { display: flex; flex-direction: column; }"
+        " .sr-row {"
+        "   display: grid;"
+        "   grid-template-columns: 44px 52px repeat(6, minmax(0, 1fr));"
+        "   gap: 3px;"
+        "   align-items: center;"
+        "   padding: 1px 4px;"
+        "   border-bottom: 1px solid #e0e0e0;"
+        " }"
+        " .sr-row:last-child { border-bottom: none; }"
+        " .sr-header { background: #e8f7fa; font-weight: bold; }"
+        " .sr-move { display: flex; gap: 2px; }"
+        " .sr-btn {"
+        "   padding: 0 3px; font-size: 9px; line-height: 1.3; height: 16px;"
+        "   border: 1px solid #aaa !important; border-radius: 2px;"
+        "   background: #f0f0f0 !important; color: #333 !important;"
+        "   cursor: pointer; }"
+        " .sr-btn:hover { background: #ddd !important; }"
+        " .sr-btn:disabled { opacity: 0.3; cursor: default; }"
+        " .sr-row > .shiny-html-output { display: contents; }"
+        " .sr-num { text-align: center; font-weight: bold; color: #00ABC9;"
+        "           font-size: 9pt; line-height: 1; }"
+        " .sr-ftag { font-size: 7.5pt; opacity: 0.85; display: block; }"
+        " .sr-f2-num { color: #cc0000 !important; }"
+        " .sr-hdr { font-size: 9pt; white-space: nowrap; overflow: hidden;"
+        "           text-overflow: ellipsis; }"
+        " .sr-col { min-width: 0; }"
+        " .sr-col .shiny-input-container { margin: 0 !important; width: 100% !important; }"
+        " .sr-col label { display: none !important; }"
+        " .sr-col select { width: 100% !important; min-width: 0 !important;"
+        "                  overflow: hidden; text-overflow: ellipsis; }"
+        " .sr-card-hdr-row { display: flex; align-items: center; width: 100%; }"
+        " .sr-card-hdr-row span { flex: 1; }"
+        " .sr-pause-btn { padding: 0 6px !important; height: 18px !important;"
+        "   line-height: 18px !important; font-size: 8.5pt !important;"
+        "   background: #fff !important; color: #00ABC9 !important;"
+        "   border-color: #fff !important; }"
+        " .sr-pause-btn:hover { background: #e0f5fa !important; }"
+        " .sr-pause-btn.sr-pause-active {"
+        "   background: #e07000 !important; color: #fff !important;"
+        "   border-color: #e07000 !important; }"
+        " #plot-resize-handle { height: 8px; cursor: ns-resize; display: flex;"
+        "   align-items: center; margin: 3px 0; }"
+        " #plot-resize-handle::after { content: ''; display: block; width: 100%;"
+        "   height: 3px; background: #ddd; border-radius: 2px; }"
+        " #plot-resize-handle:hover::after { background: #00ABC9; }"
+        " .ctrl-card .card-body { padding: 6px 8px !important; }"
+        " .ctrl-card .shiny-input-container { margin-bottom: 4px !important; }"
+        " .yax-group { margin-bottom: 4px; }"
+        " .row.g-2 { --bs-gutter-x: 0.5rem; --bs-gutter-y: 0.5rem; }"
         " #ts_plot_wrap { position:relative; }"
         " #fullscreen_btn {"
         "   position:absolute; top:6px; right:6px; z-index:20;"
@@ -563,11 +681,12 @@ app_ui = ui.page_fluid(
         "   align-items:center; justify-content:center;"
         "   font-size:11pt; color:#444; pointer-events:none; }"
         " .shiny-busy #ts_plot_overlay { display:flex !important; }"
-        " #ts_plot { min-height: 50vh !important; height: 50vh !important; }"
+        " :root { --plot-h: 450px; }"
+        " #ts_plot { min-height: var(--plot-h) !important; height: var(--plot-h) !important; }"
         " #ts_plot > div, #ts_plot iframe,"
         " #ts_plot .plotly, #ts_plot .plot-container,"
         " #ts_plot .html-widget {"
-        "   width: 100% !important; height: 100% !important; min-height: 50vh !important;"
+        "   width: 100% !important; height: 100% !important; min-height: var(--plot-h) !important;"
         " }"
         " .sidebar { background-color: #F8F8F8 !important; }"
         " .card { background-color: #F8F8F8 !important; }"
@@ -613,31 +732,6 @@ app_ui = ui.page_fluid(
             ui.h5("Or upload local file"),
             ui.input_file("data_file", "Data file (.csv, .xlsx, .zip)", accept=[".csv", ".xlsx", ".xls", ".zip"]),
             ui.input_select("dt_col", "Datetime column", choices={}),
-            ui.hr(),
-            ui.h5("View mode"),
-            ui.input_select("view_mode", "Plot type", choices=VIEW_MODES, selected="timeseries"),
-            ui.hr(),
-            ui.h5("Time interval filter"),
-            ui.input_text("start_ts", "Start (optional)", placeholder="YYYY-MM-DD HH:MM"),
-            ui.input_text("end_ts", "End (optional)", placeholder="YYYY-MM-DD HH:MM"),
-            ui.hr(),
-            ui.h5("X-axis scale"),
-            ui.input_checkbox("x_auto", "Auto scale x-axis", value=True),
-            ui.input_text("x_min", "Manual x min", placeholder="YYYY-MM-DD HH:MM"),
-            ui.input_text("x_max", "Manual x max", placeholder="YYYY-MM-DD HH:MM"),
-            ui.hr(),
-            ui.h5("Y-axis scales"),
-            *[
-                ui.div(
-                    ui.input_checkbox(f"y{ax}_auto", f"Axis {ax} auto", value=True),
-                    ui.row(
-                        ui.column(6, ui.input_text(f"y{ax}_min", None, placeholder="Min")),
-                        ui.column(6, ui.input_text(f"y{ax}_max", None, placeholder="Max")),
-                    ),
-                    class_="yax-group",
-                )
-                for ax in range(1, 5)
-            ],
             width=360,
         ),
         ui.div(
@@ -652,11 +746,47 @@ app_ui = ui.page_fluid(
                 ui.div("Computing…", id="ts_plot_overlay"),
                 id="ts_plot_wrap",
             ),
-            ui.hr(),
-            ui.row(*[ui.column(4, series_controls(i)) for i in range(1, 4)]),
-            ui.div(
-                ui.row(*[ui.column(4, series_controls(i)) for i in range(4, MAX_SERIES + 1)]),
-                id="file2_series_row",
+            ui.div(id="plot-resize-handle"),
+            series_table(),
+            ui.card(
+                ui.card_header("Y-axis scales"),
+                ui.row(
+                    *[
+                        ui.column(3,
+                            ui.input_checkbox(f"y{ax}_auto", f"Axis {ax} auto", value=True),
+                            ui.row(
+                                ui.column(6, ui.input_text(f"y{ax}_min", "Min", placeholder="Min")),
+                                ui.column(6, ui.input_text(f"y{ax}_max", "Max", placeholder="Max")),
+                            ),
+                        )
+                        for ax in range(1, 5)
+                    ],
+                ),
+                class_="ctrl-card mt-1",
+            ),
+            ui.row(
+                ui.column(3, ui.card(
+                    ui.card_header("View mode"),
+                    ui.input_select("view_mode", None, choices=VIEW_MODES, selected="timeseries"),
+                    ui.input_checkbox("show_stdev", "Show st. dev.", value=False),
+                    class_="ctrl-card h-100",
+                )),
+                ui.column(3, ui.card(
+                    ui.card_header("Time interval filter"),
+                    ui.input_text("start_ts", "Start", placeholder="YYYY-MM-DD HH:MM"),
+                    ui.input_text("end_ts",   "End",   placeholder="YYYY-MM-DD HH:MM"),
+                    class_="ctrl-card h-100",
+                )),
+                ui.column(6, ui.card(
+                    ui.card_header("X-axis scale"),
+                    ui.input_checkbox("x_auto", "Auto scale", value=True),
+                    ui.row(
+                        ui.column(6, ui.input_text("x_min", "Min", placeholder="YYYY-MM-DD HH:MM")),
+                        ui.column(6, ui.input_text("x_max", "Max", placeholder="YYYY-MM-DD HH:MM")),
+                    ),
+                    class_="ctrl-card h-100",
+                )),
+                class_="g-2 mt-1",
             ),
         ),
     ),
@@ -708,6 +838,16 @@ def server(input, output, session):
     _icos_station_id2: reactive.Value[str] = reactive.value("")
     # Pending config: holds column/series settings to apply after data loads
     _pending_config: reactive.Value[Optional[dict]] = reactive.value(None)
+    # Plot pause — when True, series input changes do not trigger a redraw
+    _plot_paused: reactive.Value[bool] = reactive.value(False)
+    # Authoritative server-side store for all series settings (col, agg, chart, dash, color, yaxis).
+    # Updated directly on swap so the plot re-renders without a browser round-trip.
+    _series_store: reactive.Value[list] = reactive.value([
+        {"label": f"S{i+1}", "file_num": 1 if i < 3 else 2,
+         "col": "", "agg": "raw", "chart": "line", "dash": "solid",
+         "color": DEFAULT_COLORS[i], "yaxis": "1"}
+        for i in range(MAX_SERIES)
+    ])
 
     # --- Config storage (browser localStorage) ---
 
@@ -718,6 +858,7 @@ def server(input, output, session):
         cfg["icos_file2"] = input.icos_file2()
         cfg["dt_col"] = input.dt_col()
         cfg["view_mode"] = input.view_mode()
+        cfg["show_stdev"] = input.show_stdev()
         cfg["start_ts"] = input.start_ts()
         cfg["end_ts"] = input.end_ts()
         cfg["x_auto"] = input.x_auto()
@@ -744,6 +885,8 @@ def server(input, output, session):
             ui.update_select("icos_file2", selected=cfg["icos_file2"])
         if "view_mode" in cfg:
             ui.update_select("view_mode", selected=cfg["view_mode"])
+        if "show_stdev" in cfg:
+            ui.update_checkbox("show_stdev", value=cfg["show_stdev"])
         if "start_ts" in cfg:
             ui.update_text("start_ts", value=cfg["start_ts"])
         if "end_ts" in cfg:
@@ -1134,6 +1277,94 @@ def server(input, output, session):
     for _cslot in range(1, MAX_SERIES + 1):
         _make_col_sync(_cslot)
 
+    # --- Combined slot-num cell renderer: label + file-tag + dynamic colour class ---
+    def _make_slot_num_renderer(pos: int):
+        @output(id=f"slot_num_{pos}")
+        @render.ui
+        def _():
+            entry = _series_store.get()[pos - 1]
+            label = entry.get("label", f"S{pos}")
+            # S1-S3 blue, S4-S6 red — follows the label, not the position
+            try:
+                num = int(label[1:])
+            except (ValueError, IndexError):
+                num = pos
+            css_cls = "sr-num sr-f2-num" if num >= 4 else "sr-num"
+            fn  = entry.get("file_num", 1 if pos <= 3 else 2)
+            sid = _icos_station_id.get() if fn == 1 else _icos_station_id2.get()
+            ftag = sid or ("F1" if fn == 1 else "F2")
+            return ui.div(
+                ui.span(label, class_="sr-label-text"),
+                ui.span(ftag,  class_="sr-ftag"),
+                class_=css_cls,
+            )
+        return _
+
+    for _pos in range(1, MAX_SERIES + 1):
+        _make_slot_num_renderer(_pos)
+
+    # Keep _series_store in sync with browser inputs — one effect per key/slot so that
+    # a partial browser flush after a swap cannot revert the whole store at once.
+    def _make_series_sync(slot: int, key: str):
+        @reactive.effect
+        def _sync_one():
+            val = input[f"{key}_{slot}"]()
+            with reactive.isolate():
+                store = list(_series_store.get())
+                entry = dict(store[slot - 1])
+            if entry.get(key) == val:
+                return  # store already correct, avoid spurious invalidation
+            entry[key] = val
+            store[slot - 1] = entry
+            _series_store.set(store)
+        return _sync_one
+
+    # --- Series row reorder (swap settings between adjacent slots) ---
+    _SWAP_KEYS = ["col", "agg", "chart", "dash", "color", "yaxis"]
+
+    for _slot in range(1, MAX_SERIES + 1):
+        for _key in _SWAP_KEYS:
+            _make_series_sync(_slot, _key)
+
+    def _make_swap(a: int, b: int, btn: str):
+        @reactive.effect
+        @reactive.event(input[btn])
+        def _swap():
+            # Read from the server-side store (no browser round-trip needed)
+            with reactive.isolate():
+                store = list(_series_store.get())
+            av = dict(store[a - 1])
+            bv = dict(store[b - 1])
+            store[a - 1] = bv
+            store[b - 1] = av
+            # Write back immediately — invalidates _plot_inputs() right now
+            _series_store.set(store)
+            # Also update browser UI for visual consistency
+            for k in _SWAP_KEYS:
+                if k == "chart":
+                    # Must update choices + selected together: browser may still have the
+                    # old (restricted) choice list and would silently ignore an unknown value.
+                    def _ch(agg): return _CHART_MONTHLY if agg == "monthly" else _CHART_LINE_ONLY
+                    ui.update_select(f"chart_{a}", choices=_ch(bv["agg"]), selected=bv["chart"])
+                    ui.update_select(f"chart_{b}", choices=_ch(av["agg"]), selected=av["chart"])
+                else:
+                    ui.update_select(f"{k}_{a}", selected=bv[k])
+                    ui.update_select(f"{k}_{b}", selected=av[k])
+        return _swap
+
+    for _s in range(1, MAX_SERIES):
+        _make_swap(_s, _s + 1, f"move_down_{_s}")
+        _make_swap(_s, _s + 1, f"move_up_{_s + 1}")
+
+    @reactive.effect
+    @reactive.event(input.plot_pause)
+    async def _toggle_pause():
+        paused = not _plot_paused.get()
+        _plot_paused.set(paused)
+        ui.update_action_button("plot_pause", label="▶ Resume" if paused else "⏸ Pause")
+        await session.send_custom_message("set_pause_state", paused)
+
+
     @reactive.effect
     @reactive.event(input.view_mode)
     def _update_agg_choices() -> None:
@@ -1164,17 +1395,15 @@ def server(input, output, session):
         view = input.view_mode()
         if view != "timeseries":
             return  # handled by _update_agg_choices
+        with reactive.isolate():
+            store = _series_store.get()
         for slot in range(1, MAX_SERIES + 1):
             agg = input[f"agg_{slot}"]()
-            if agg == "monthly":
-                choices = _CHART_MONTHLY
-            else:
-                choices = _CHART_LINE_ONLY
-            # Omit selected — Shiny preserves the current browser value if valid.
-            # _apply_config() already pre-expanded choices and set selected="bar" when
-            # agg="monthly", so by the time this fires the browser already holds the
-            # correct value.
-            ui.update_select(f"chart_{slot}", choices=choices)
+            choices = _CHART_MONTHLY if agg == "monthly" else _CHART_LINE_ONLY
+            # Use the authoritative store value; fall back to "line" if no longer valid.
+            current = store[slot - 1].get("chart", "line")
+            selected = current if current in choices else "line"
+            ui.update_select(f"chart_{slot}", choices=choices, selected=selected)
 
     @reactive.calc
     def parsed_df() -> Optional[pd.DataFrame]:
@@ -1264,20 +1493,23 @@ def server(input, output, session):
         has_file2 = raw_df2() is not None
         if has_file2:
             ui.insert_ui(
-                ui.tags.style("#file2_series_row { display: block !important; }", id="file2_show_css"),
+                ui.tags.style(".sr-file2 { display: grid !important; }", id="file2_show_css"),
                 selector="head",
                 where="beforeEnd",
             )
             ui.remove_ui("#file2_hide_css")
         else:
             ui.insert_ui(
-                ui.tags.style("#file2_series_row { display: none !important; }", id="file2_hide_css"),
+                ui.tags.style(".sr-file2 { display: none !important; }", id="file2_hide_css"),
                 selector="head",
                 where="beforeEnd",
             )
             ui.remove_ui("#file2_show_css")
 
-    def aggregate_series(frame: pd.DataFrame, dt_col: str, value_col: str, agg: str) -> pd.DataFrame:
+    def aggregate_series(
+        frame: pd.DataFrame, dt_col: str, value_col: str, agg: str,
+        with_std: bool = False,
+    ) -> pd.DataFrame:
         series = frame[[dt_col, value_col]].copy()
         # Drop rows where datetime is missing, but keep NaN values so gaps show in plots
         series = series.dropna(subset=[dt_col])
@@ -1297,14 +1529,11 @@ def server(input, output, session):
         if freq is None:
             return series
 
-        grouped = (
-            series.set_index(dt_col)[value_col]
-            .resample(freq)
-            .mean()
-            .dropna()
-            .rename(value_col)
-            .reset_index()
-        )
+        resampled = series.set_index(dt_col)[value_col].resample(freq)
+        grouped = resampled.mean().dropna().rename(value_col).reset_index()
+        if with_std:
+            std = resampled.std().reindex(grouped[dt_col]).values
+            grouped[f"{value_col}_std"] = std
         return grouped
 
     def profile_series(
@@ -1350,17 +1579,7 @@ def server(input, output, session):
     @reactive.calc
     def _plot_inputs():
         """Collect all inputs that affect the plot into a single dict."""
-        col_sels = _col_selections.get()
-        series = []
-        for slot in range(1, MAX_SERIES + 1):
-            series.append({
-                "col": col_sels.get(f"col_{slot}", ""),
-                "agg": input[f"agg_{slot}"](),
-                "chart": input[f"chart_{slot}"](),
-                "dash": input[f"dash_{slot}"](),
-                "color": input[f"color_{slot}"](),
-                "yaxis": input[f"yaxis_{slot}"](),
-            })
+        series = [dict(s) for s in _series_store.get()]
         yaxes = {}
         for ax in range(1, 5):
             auto = input[f"y{ax}_auto"]()
@@ -1376,6 +1595,7 @@ def server(input, output, session):
                 }
         return {
             "view_mode": input.view_mode(),
+            "show_stdev": input.show_stdev(),
             "x_auto": input.x_auto(),
             "x_min": input.x_min(),
             "x_max": input.x_max(),
@@ -1398,8 +1618,9 @@ def server(input, output, session):
         axis_maxs: dict[int, float] = {}
         for slot in range(1, MAX_SERIES + 1):
             col = input[f"col_{slot}"]()
-            # Pick correct dataframe and dt col per slot
-            if slot <= 3:
+            # Pick correct dataframe and dt col per slot (respects swapped file_num)
+            fn = _series_store.get()[slot - 1].get("file_num", 1 if slot <= 3 else 2)
+            if fn == 1:
                 sdf_base = df
                 s_dt_col = dt_col
             else:
@@ -1502,8 +1723,13 @@ def server(input, output, session):
     @output
     @render_widget
     def ts_plot():
-        params = _plot_inputs()
-        df = filtered_df()
+        if _plot_paused.get():
+            with reactive.isolate():
+                params = _plot_inputs()
+                df = filtered_df()
+        else:
+            params = _plot_inputs()
+            df = filtered_df()
         fig = go.Figure()
 
         if df is None or df.empty:
@@ -1519,6 +1745,7 @@ def server(input, output, session):
         dt_col = input.dt_col()
         view_mode = params["view_mode"]
         is_profile = view_mode != "timeseries"
+        show_stdev = params.get("show_stdev", False)
 
         # Get the filename for the plot title (ICOS or local upload)
         icos_name = _icos_name.get()
@@ -1531,6 +1758,7 @@ def server(input, output, session):
         used_axes: set[int] = set()
         trace_count = 0
         bar_offset = 0  # counter for offsetgroup so grouped bars don't overlap
+        _pending_traces: list = []  # collected before adding to fig in reverse order
 
         # Second file filtered data (used by _update_yaxis_ranges and fallback path)
         df2 = filtered_df2()
@@ -1564,9 +1792,10 @@ def server(input, output, session):
             if not value_col:
                 continue
 
-            slot_dt_col = dt_col if slot <= 3 else dt_col2
-            parquet_path = _parquet1 if slot <= 3 else _parquet2
-            schema       = schema1   if slot <= 3 else schema2
+            is_file1     = s.get("file_num", 1 if slot <= 3 else 2) == 1
+            slot_dt_col  = dt_col    if is_file1 else dt_col2
+            parquet_path = _parquet1 if is_file1 else _parquet2
+            schema       = schema1   if is_file1 else schema2
 
             agg = s["agg"]
             chart = s["chart"]
@@ -1596,7 +1825,7 @@ def server(input, output, session):
                     series_df.loc[series_df[qc_col].isin([2, 3]), value_col] = float("nan")
             else:
                 # Fallback: use full filtered DataFrame (upload before parquet exists, or no data)
-                slot_df = df if slot <= 3 else df2
+                slot_df = df if is_file1 else df2
                 if slot_df is None or slot_df.empty:
                     continue
                 if not slot_dt_col or slot_dt_col not in slot_df.columns:
@@ -1609,12 +1838,13 @@ def server(input, output, session):
                 else:
                     series_df = slot_df
 
-            data = aggregate_series(series_df, slot_dt_col, value_col, agg)
+            use_std = show_stdev and not is_profile and agg != "raw" and chart != "bar"
+            data = aggregate_series(series_df, slot_dt_col, value_col, agg, with_std=use_std)
             if data.empty:
                 continue
 
             yref = "y" if axis_num == 1 else f"y{axis_num}"
-            sid = _icos_station_id.get() if slot <= 3 else _icos_station_id2.get()
+            sid = _icos_station_id.get() if is_file1 else _icos_station_id2.get()
             name = f"{sid} {value_col} ({agg})" if sid else f"{value_col} ({agg})"
 
             if is_profile:
@@ -1626,7 +1856,7 @@ def server(input, output, session):
                 # Convert x to list of strings for consistent category matching
                 x_cat = [str(v) for v in x_vals.values]
                 if chart == "bar":
-                    fig.add_bar(
+                    _pending_traces.append(go.Bar(
                         x=x_cat,
                         y=y_vals.values,
                         name=name,
@@ -1634,19 +1864,21 @@ def server(input, output, session):
                         yaxis=yref,
                         opacity=0.85,
                         offsetgroup=str(bar_offset),
-                    )
+                        legendrank=slot,
+                    ))
                     bar_offset += 1
                 else:
-                    fig.add_scatter(
+                    _pending_traces.append(go.Scatter(
                         x=x_cat,
                         y=y_vals.values,
                         mode="lines+markers",
                         name=name,
                         yaxis=yref,
                         line={"color": color, "dash": dash, "width": 2},
-                    )
+                        legendrank=slot,
+                    ))
             elif agg == "monthly" and chart == "bar":
-                fig.add_bar(
+                _pending_traces.append(go.Bar(
                     x=data[slot_dt_col],
                     y=data[value_col],
                     name=name,
@@ -1654,10 +1886,22 @@ def server(input, output, session):
                     yaxis=yref,
                     opacity=0.85,
                     offsetgroup=str(bar_offset),
-                )
+                    legendrank=slot,
+                ))
                 bar_offset += 1
             else:
-                fig.add_scatter(
+                std_col = f"{value_col}_std"
+                error_y = None
+                if use_std and std_col in data.columns:
+                    error_y = dict(
+                        type="data",
+                        array=data[std_col].tolist(),
+                        visible=True,
+                        color=color,
+                        thickness=1,
+                        width=3,
+                    )
+                _pending_traces.append(go.Scatter(
                     x=data[slot_dt_col],
                     y=data[value_col],
                     mode="lines",
@@ -1665,11 +1909,17 @@ def server(input, output, session):
                     yaxis=yref,
                     line={"color": color, "dash": dash, "width": 2},
                     connectgaps=False,
-                )
+                    error_y=error_y,
+                    legendrank=slot,
+                ))
 
             axis_labels[axis_num].add(value_col)
             used_axes.add(axis_num)
             trace_count += 1
+
+        # Add traces in reverse panel order so position-1 series is drawn on top
+        for _trace in reversed(_pending_traces):
+            fig.add_trace(_trace)
 
         xaxis_config = {"title": dt_col, "showline": True, "mirror": True, "ticks": "outside", "ticklen": 4, "linewidth": 1, "linecolor": "black"}
         if is_profile:
