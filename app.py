@@ -234,7 +234,11 @@ _COLOR_OPTION_CSS = "\n".join(
 
 
 app_ui = ui.page_fluid(
-    ui.h2("ICOS Ecosystem FLUXNET data browser"),
+    ui.div(
+        ui.tags.img(src="icos_logo.png", height="40px", style="vertical-align: middle; margin-right: 10px;"),
+        ui.tags.span("FLUXNET data browser", style="font-size: 14pt !important; font-weight: bold; vertical-align: middle;"),
+        style="display: flex; align-items: center; margin-bottom: 0.2rem;",
+    ),
     ui.tags.style(
         "body, .form-control, .form-select, label, .card-header,"
         " .shiny-input-container, .selectize-input, .selectize-dropdown,"
@@ -260,6 +264,16 @@ app_ui = ui.page_fluid(
         " .sidebar > * { margin-bottom: 0 !important; margin-top: 1px !important; }"
         " .sidebar label { margin-bottom: 0 !important; }"
         " .sidebar select, .sidebar input { margin-bottom: 0 !important; margin-top: 0 !important; }"
+        " .sidebar .form-check { margin-bottom: 0 !important; margin-top: 0 !important; padding-top: 0 !important; padding-bottom: 0 !important; min-height: 0 !important; line-height: 1 !important; }"
+        " .sidebar .form-group.shiny-input-container { margin-bottom: 0 !important; margin-top: 0 !important; padding: 0 !important; }"
+        " .sidebar .row { margin-top: 0 !important; margin-bottom: 0 !important; --bs-gutter-y: 0 !important; }"
+        " .sidebar .row .col-sm-6 .shiny-input-container label { display: none !important; }"
+        " .sidebar .row .col-sm-6 .shiny-input-container { margin-top: 0 !important; margin-bottom: 0 !important; }"
+        " .sidebar .row .col-sm-6 .form-control { margin-top: 0 !important; padding-top: 1px !important; padding-bottom: 1px !important; }"
+        " .yax-group { margin-bottom: 2px !important; margin-top: 0 !important; }"
+        " .yax-group > * { margin-bottom: 0 !important; margin-top: 0 !important; }"
+        " .yax-group .form-check { margin-bottom: -2px !important; }"
+        " .yax-group .row { margin-top: -2px !important; }"
         " .sidebar h5 { margin-bottom: 0 !important; margin-top: 2px !important; font-size: 10pt !important; font-weight: bold !important; }"
         " .sidebar hr { margin: 2px 0 !important; }"
         " #ts_plot { min-height: 50vh !important; height: 50vh !important; }"
@@ -268,6 +282,11 @@ app_ui = ui.page_fluid(
         " #ts_plot .html-widget {"
         "   width: 100% !important; height: 100% !important; min-height: 50vh !important;"
         " }"
+        " .sidebar { background-color: #F8F8F8 !important; }"
+        " .card { background-color: #F8F8F8 !important; }"
+        " .card-header { background-color: #00ABC9 !important; color: #fff !important; }"
+        " .btn { background-color: #00ABC9 !important; color: #fff !important; border-color: #00ABC9 !important; }"
+        " .btn:hover { background-color: #008fa8 !important; border-color: #008fa8 !important; }"
         + _COLOR_OPTION_CSS
     ),
     ui.layout_sidebar(
@@ -296,15 +315,15 @@ app_ui = ui.page_fluid(
             ui.hr(),
             ui.h5("Y-axis scales"),
             *[
-                item
-                for ax in range(1, 5)
-                for item in (
+                ui.div(
                     ui.input_checkbox(f"y{ax}_auto", f"Axis {ax} auto", value=True),
                     ui.row(
-                        ui.column(6, ui.input_text(f"y{ax}_min", "Min", placeholder="")),
-                        ui.column(6, ui.input_text(f"y{ax}_max", "Max", placeholder="")),
+                        ui.column(6, ui.input_text(f"y{ax}_min", None, placeholder="Min")),
+                        ui.column(6, ui.input_text(f"y{ax}_max", None, placeholder="Max")),
                     ),
+                    class_="yax-group",
                 )
+                for ax in range(1, 5)
             ],
             width=360,
         ),
@@ -980,4 +999,4 @@ def server(input, output, session):
         yield buf.read()
 
 
-app = App(app_ui, server)
+app = App(app_ui, server, static_assets=Path(__file__).parent / "www")
