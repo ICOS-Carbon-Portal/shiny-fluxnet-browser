@@ -18,6 +18,7 @@ A **Shiny for Python** web application for interactive time series analysis of [
 - **4 Y-axes** – Assign each series to one of four independent Y-axes (2 left, 2 right) with auto-shifting.
 - **X-axis control** – Auto-scale or manually set min/max datetime range.
 - **Interactive plots** – Powered by [Plotly](https://plotly.com/python/) with pan, zoom, hover and export.
+- **Named configurations** – Save the current plot settings (series, colours, axes, view mode, etc.) under a custom name directly in the browser. Reload or delete any saved config at any time — no server or file system access required.
 
 ## Screenshots
 
@@ -79,7 +80,7 @@ This app queries **ICOS ETC Level 2 FLUXNET** data products from the [ICOS Carbo
 
 ## License
 
-This project is open source. See the repository for licence details.
+This project is licensed under the [GNU General Public License v3.0](LICENSE).
 
 ## Acknowledgements
 
