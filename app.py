@@ -373,7 +373,6 @@ app_ui = ui.page_fluid(
                 ui.column(2, ui.download_button("download_pdf", "Export PDF", class_="btn-sm btn-outline-secondary")),
             ),
             output_widget("ts_plot", height="50vh"),
-            ui.output_ui("citation_text"),
             ui.hr(),
             ui.row(*[ui.column(4, series_controls(i)) for i in range(1, 4)]),
             ui.div(
@@ -700,31 +699,7 @@ def server(input, output, session):
     @output
     @render.ui
     def citation_text():
-        citation = _icos_citation.get()
-        station_id = _icos_station_id.get()
-        citation2 = _icos_citation2.get()
-        station_id2 = _icos_station_id2.get()
-        if not citation and not station_id and not citation2 and not station_id2:
-            return ui.div()
-        lines = [ui.p("ICOS data is licensed by CC BY 4.0.", style="margin: 0;")]
-        if station_id or citation:
-            parts = []
-            if station_id:
-                parts.append(f"Station {station_id}.")
-            if citation:
-                parts.append(f"Please cite as: {citation}")
-            lines.append(ui.p(" ".join(parts), style="margin: 0;"))
-        if station_id2 or citation2:
-            parts2 = []
-            if station_id2:
-                parts2.append(f"Station {station_id2}.")
-            if citation2:
-                parts2.append(f"Please cite as: {citation2}")
-            lines.append(ui.p(" ".join(parts2), style="margin: 0;"))
-        return ui.div(
-            *lines,
-            style="font-size: 8pt; margin-top: 4px; color: #555;",
-        )
+        return ui.div()
 
     # --- Dynamic series panel headers ---
     def _make_header_renderer(slot: int):
@@ -1116,10 +1091,24 @@ def server(input, output, session):
 
         xaxis_config["domain"] = [left_margin, right_margin]
 
-        plot_title = file_name or "Time Series"
+        # Build title from station IDs
+        sid1 = _icos_station_id.get()
+        sid2 = _icos_station_id2.get()
+        if sid1 and sid2:
+            station_label = f"stations {sid1} & {sid2}"
+        elif sid1:
+            station_label = f"station {sid1}"
+        elif sid2:
+            station_label = f"station {sid2}"
+        else:
+            station_label = ""
+        if station_label:
+            plot_title = f"ICOS Ecosystem FLUXNET data from {station_label}"
+        else:
+            plot_title = "ICOS Ecosystem FLUXNET data"
         if is_profile:
             mode_label = VIEW_MODES.get(view_mode, "")
-            plot_title = f"{file_name} — {mode_label}" if file_name else mode_label
+            plot_title = f"{plot_title} — {mode_label}"
 
         layout_update = {
             "template": "plotly_white",
@@ -1201,6 +1190,60 @@ def server(input, output, session):
             }
 
         fig.update_layout(**layout_update)
+
+        # Add citation/licence text as annotation at bottom of figure
+        citation_lines = []
+        cit1 = _icos_citation.get()
+        sid1 = _icos_station_id.get()
+        cit2 = _icos_citation2.get()
+        sid2 = _icos_station_id2.get()
+        if cit1 or sid1 or cit2 or sid2:
+            citation_lines.append("ICOS data is licensed by CC BY 4.0.")
+        if sid1 or cit1:
+            parts = []
+            if sid1:
+                parts.append(f"Station {sid1}.")
+            if cit1:
+                parts.append(f"Please cite as: {cit1}")
+            citation_lines.append(" ".join(parts))
+        if sid2 or cit2:
+            parts2 = []
+            if sid2:
+                parts2.append(f"Station {sid2}.")
+            if cit2:
+                parts2.append(f"Please cite as: {cit2}")
+            citation_lines.append(" ".join(parts2))
+        if citation_lines:
+            # Wrap long lines since Plotly annotations don't auto-wrap
+            def _wrap_line(line: str, max_chars: int = 200) -> str:
+                words = line.split()
+                wrapped, current = [], ""
+                for w in words:
+                    if current and len(current) + 1 + len(w) > max_chars:
+                        wrapped.append(current)
+                        current = w
+                    else:
+                        current = f"{current} {w}" if current else w
+                if current:
+                    wrapped.append(current)
+                return "<br>".join(wrapped)
+
+            wrapped = "<br>".join(_wrap_line(line) for line in citation_lines)
+            fig.add_annotation(
+                x=0,
+                y=-0.28,
+                xref="paper",
+                yref="paper",
+                text=wrapped,
+                showarrow=False,
+                font={"size": 10, "color": "#555"},
+                align="left",
+                xanchor="left",
+                yanchor="top",
+            )
+            # Count total <br> breaks to size the bottom margin
+            n_breaks = wrapped.count("<br>") + 1
+            fig.update_layout(margin={"b": 120 + 14 * n_breaks})
 
         if trace_count == 0:
             fig.add_annotation(
