@@ -237,7 +237,7 @@ app_ui = ui.page_fluid(
     ui.div(
         ui.tags.img(src="icos_logo.png", height="40px", style="vertical-align: middle; margin-right: 10px;"),
         ui.tags.span("FLUXNET data browser", style="font-size: 14pt !important; font-weight: bold; vertical-align: middle;"),
-        style="display: flex; align-items: center; margin-bottom: 0.2rem;",
+        style="display: flex; align-items: center; margin-bottom: 0.2rem; background-color: #00ABC9; color: #fff; padding: 0.4rem 0.6rem; border-radius: 4px;",
     ),
     ui.tags.style(
         "body, .form-control, .form-select, label, .card-header,"
